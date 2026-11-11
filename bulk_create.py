@@ -190,9 +190,18 @@ def register_single(proxy=None, max_retries=2):
                         "created_at_wib": ts(),
                     }
             elif r.status_code == 429:
-                current_proxy = None
-                time.sleep(1)
-                continue
+                if attempt < max_retries:
+                    current_proxy = None
+                    time.sleep(1.5)
+                    continue
+                return {
+                    "email": email,
+                    "password": pw,
+                    "api_key": "",
+                    "status": "rate_limit_429",
+                    "proxy": current_proxy or "direct",
+                    "created_at_wib": ts(),
+                }
             else:
                 return {
                     "email": email,
@@ -216,6 +225,15 @@ def register_single(proxy=None, max_retries=2):
                 "created_at_wib": ts(),
             }
 
+    return {
+        "email": email,
+        "password": pw,
+        "api_key": "",
+        "status": "exhausted_429",
+        "proxy": current_proxy or "direct",
+        "created_at_wib": ts(),
+    }
+
 def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=50):
     global total_ok, total_fail, total_done
     local_buffer = []
@@ -228,6 +246,15 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
 
         p = next(proxy_iter) if proxy_iter else None
         res = register_single(p)
+        if not res or not isinstance(res, dict):
+            res = {
+                "email": f"unknown_{secrets.token_hex(4)}@fldubai.com",
+                "password": "",
+                "api_key": "",
+                "status": "err_null_response",
+                "proxy": p or "direct",
+                "created_at_wib": ts(),
+            }
         append_records(res)
 
         with stats_lock:
