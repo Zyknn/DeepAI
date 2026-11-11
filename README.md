@@ -58,17 +58,17 @@ High-performance automated account harvesting, auto-harvesting API key, and inst
 
 ```text
 .
-├── main.py # Launcher utama / entrypoint TUI
-├── tui.py # Interactive TUI (harvesting, stats, instant share, test)
-├── bulk_create.py # Engine utama: multi-threaded direct HTTP harvesting & live sync
-├── sync_to_9router.py # Standalone ingest tool: CSV -> 9Router SQLite DB
-├── deepai.py # Engine registrasi alternatif via Chromium Playwright
-├── proxylist.py # Helper proxy rotation pool
-├── tempmail.py # Helper mailbox generator & token handler (mail.tm)
-├── util.py # Logging helper & sanitasi proxy string
-├── proxies.example.txt # Contoh struktur file konfigurasi proxy
-├── requirements.txt # Daftar dependensi Python
-├── LICENSE # Lisensi resmi MIT (Copyright Zykuan)
+├── deepai.py          # Launcher utama CLI & TUI Dashboard
+├── main.py            # Alias launcher entrypoint
+├── tui.py             # Interactive TUI (animated harvest, stats, share, test)
+├── bulk_create.py     # Engine utama: multi-threaded direct HTTP harvesting & live sync
+├── sync_to_9router.py # Ingest tool: CSV -> 9Router SQLite DB
+├── proxylist.py       # Helper proxy rotation pool
+├── tempmail.py        # Helper mailbox generator & token handler (mail.tm)
+├── util.py            # Logging helper & sanitasi proxy string
+├── proxies.example.txt# Contoh struktur file konfigurasi proxy
+├── requirements.txt   # Daftar dependensi Python
+├── LICENSE            # Lisensi resmi MIT (Copyright Zykuan)
 └── README.md
 ```
 
@@ -81,8 +81,9 @@ Cara paling praktis menjalankan harvesting dan manajemen akun adalah menggunakan
 ```bash
 git clone https://github.com/Zyknn/DeepAI.git
 cd DeepAI
-python3 main.py
+python3 deepai.py
 ```
+*(Catatan: `python3 main.py` juga tetap didukung sebagai launcher)*
 
 Antarmuka siap pakai tanpa konfigurasi tambahan:
 - **[1] Quick Harvest:** Pilih target (100 / 500 / 1000 / 5000 multi-batch safe cooldown)
