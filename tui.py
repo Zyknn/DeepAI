@@ -5,6 +5,8 @@ Interactive Text User Interface for DeepAI Account Harvesting & Management.
 Crafted by Zykuan (@Zyknn)
 """
 
+import atexit
+import builtins
 import csv
 import json
 import os
@@ -25,19 +27,23 @@ from pathlib import Path
 
 # Impor engine backend
 BASE_DIR = Path(__file__).parent.resolve()
-sys.path.insert(0, str(BASE_DIR))
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 try:
     import requests
 except ImportError:
     requests = None
 
+BULK_IMPORT_ERR = None
 try:
     from bulk_create import (
         run_bulk_harvest, run_bulk_farm, CSV_FILE, OUT_DIR, DB_FILE,
-        probe_glm_key, UUID_RE, JSONL_FILE
+        probe_glm_key as _bulk_probe_glm_key, UUID_RE, JSONL_FILE
     )
-except ImportError:
+    probe_glm_key = _bulk_probe_glm_key
+except ImportError as _imp_err:
+    BULK_IMPORT_ERR = str(_imp_err)
     CSV_FILE = BASE_DIR / "out_deepai" / "deepai.csv"
     JSONL_FILE = BASE_DIR / "out_deepai" / "deepai.jsonl"
     OUT_DIR = BASE_DIR / "out_deepai"
@@ -45,8 +51,7 @@ except ImportError:
     UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
     run_bulk_harvest = None
     run_bulk_farm = None
-    def probe_glm_key(k, timeout=7):
-        return 0, False, 0, "No bulk_create engine"
+    probe_glm_key = lambda api_key, timeout=7: (0, False, 0, "No bulk_create engine")
 
 # Palet Warna (ANSI TrueColor + Fallback)
 C_RESET   = "\033[0m"
@@ -122,64 +127,188 @@ def get_public_ip():
     except Exception:
         return "127.0.0.1"
 
+_KEY_PUSHBACK = bytearray()
+_WIN_PUSHBACK = []
+_ORIG_TERMIOS = None
+
+def _restore_termios():
+    """Kembalikan terminal ke mode normal (cooked + echo) bila sempat diubah ke cbreak."""
+    global _ORIG_TERMIOS
+    if _ORIG_TERMIOS is None or not sys.stdin.isatty():
+        return
+    try:
+        import termios
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _ORIG_TERMIOS)
+    except Exception:
+        pass
+
+atexit.register(_restore_termios)
+
+def _ensure_cbreak():
+    """Aktifkan cbreak non-canonical tanpa menonaktifkan OPOST/ISIG, dan cegah kernel n_tty membuang byte saat toggle."""
+    global _ORIG_TERMIOS
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        if _ORIG_TERMIOS is None:
+            _ORIG_TERMIOS = termios.tcgetattr(fd)
+        attrs = termios.tcgetattr(fd)
+        attrs[0] &= ~(termios.ICRNL | termios.IXON)
+        attrs[3] &= ~(termios.ICANON | termios.ECHO)
+        attrs[6][termios.VMIN] = 1
+        attrs[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception:
+        pass
+
+def input(prompt=""):
+    """Wrapper input() yang otomatis memulihkan mode cooked/echo sebelum membaca baris."""
+    _restore_termios()
+    return builtins.input(prompt)
+
+def _posix_read_byte(fd, timeout=None):
+    """Baca 1 byte dari pushback buffer atau OS fd dengan select opsional."""
+    if _KEY_PUSHBACK:
+        b = _KEY_PUSHBACK.pop(0)
+        return bytes([b])
+    if timeout is not None:
+        r, _, _ = select.select([fd], [], [], timeout)
+        if not r:
+            return b""
+    return os.read(fd, 1)
+
+def flush_stdin():
+    """Buang sisa byte CR/LF atau input tertinggal di buffer stdin."""
+    _KEY_PUSHBACK.clear()
+    _WIN_PUSHBACK.clear()
+    if not sys.stdin.isatty():
+        return
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        return
+    except ImportError:
+        pass
+    except Exception:
+        return
+    try:
+        import msvcrt
+        kbhit_fn = getattr(msvcrt, "kbhit", None)
+        getch_fn = getattr(msvcrt, "getch", None)
+        if kbhit_fn and getch_fn:
+            while kbhit_fn():
+                getch_fn()
+    except Exception:
+        pass
+
+def _drain_paired_newline_posix(fd):
+    """Jika user menekan angka + Enter berurutan (<20ms), buang CR/LF pasangannya tanpa menghilangkan tombol lain."""
+    try:
+        nxt = _posix_read_byte(fd, timeout=0.02)
+        if not nxt:
+            return
+        if nxt == b"\r":
+            nxt2 = _posix_read_byte(fd, timeout=0.005)
+            if nxt2 and nxt2 != b"\n":
+                _KEY_PUSHBACK.append(nxt2[0])
+        elif nxt != b"\n":
+            _KEY_PUSHBACK.append(nxt[0])
+    except Exception:
+        pass
+
 def read_key():
     """Membaca 1 tombol (termasuk arrow keys, enter, dan shortcut) secara akurat tanpa buffer lag."""
     if not sys.stdin.isatty():
         try:
             line = sys.stdin.readline()
-            return line.strip() if line else "0"
+            if not line:
+                return "0"
+            s = line.strip()
+            if s == "":
+                return "ENTER"
+            if "\x1b[A" in s or "\x1bOA" in s or s in ("w", "W", "k", "K"):
+                return "UP"
+            if "\x1b[B" in s or "\x1bOB" in s or s in ("s", "S", "j", "J"):
+                return "DOWN"
+            if s in ("q", "Q"):
+                return "0"
+            return s
         except Exception:
             return "0"
 
     try:
         import termios
-        import tty
         fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            # Baca 1 byte pertama via OS file descriptor (bypass TextIOWrapper buffering)
-            ch = os.read(fd, 1)
+        _ensure_cbreak()
+        while True:
+            ch = _posix_read_byte(fd)
             if not ch:
                 return "0"
             if ch == b"\x03":  # Ctrl+C
                 raise KeyboardInterrupt
             if ch in (b"\r", b"\n", b" "):
+                if ch == b"\r":
+                    nxt = _posix_read_byte(fd, timeout=0.005)
+                    if nxt and nxt != b"\n":
+                        _KEY_PUSHBACK.append(nxt[0])
                 return "ENTER"
-            
-            if ch == b"\x1b":
-                # Escape sequence (panah / escape / keypad / SS3)
-                seq = b"\x1b"
-                # Berikan jeda 0.15s agar packet SSH yang terpisah latensi jaringan bisa sampai
-                while True:
-                    r, _, _ = select.select([fd], [], [], 0.15)
-                    if r:
-                        chunk = os.read(fd, 16)
-                        if not chunk:
-                            break
-                        seq += chunk
-                        # Cek apakah sequence sudah selesai (panah atau keypad)
-                        if any(k in seq for k in (b"[A", b"[B", b"[C", b"[D", b"OA", b"OB", b"OC", b"OD", b"OM")):
-                            break
-                    else:
-                        break
 
-                if b"[A" in seq or b"OA" in seq or seq.endswith(b"A"):
-                    return "UP"
-                elif b"[B" in seq or b"OB" in seq or seq.endswith(b"B"):
-                    return "DOWN"
-                elif b"[C" in seq or b"OC" in seq or seq.endswith(b"C"):
-                    return "RIGHT"
-                elif b"[D" in seq or b"OD" in seq or seq.endswith(b"D"):
-                    return "LEFT"
-                elif b"OM" in seq:
-                    return "ENTER"
-                return "ESC"
+            if ch == b"\x1b":
+                nxt = _posix_read_byte(fd, timeout=0.15)
+                if not nxt:
+                    return "ESC"
+
+                if nxt == b"[":
+                    seq = b"["
+                    for _ in range(32):
+                        b_ch = _posix_read_byte(fd, timeout=0.10)
+                        if not b_ch:
+                            break
+                        seq += b_ch
+                        if 0x40 <= b_ch[0] <= 0x7E:
+                            break
+                    # Abaikan mouse/focus/paste events agar tidak memicu ESC palsu
+                    if seq.startswith((b"[<", b"[M")) or seq in (b"[I", b"[O"):
+                        continue
+                    final = seq[-1:]
+                    if final == b"A":
+                        return "UP"
+                    if final == b"B":
+                        return "DOWN"
+                    if final == b"C":
+                        return "RIGHT"
+                    if final == b"D":
+                        return "LEFT"
+                    continue
+
+                if nxt == b"O":
+                    b_ch = _posix_read_byte(fd, timeout=0.10)
+                    if not b_ch:
+                        continue
+                    if b_ch == b"A":
+                        return "UP"
+                    if b_ch == b"B":
+                        return "DOWN"
+                    if b_ch == b"C":
+                        return "RIGHT"
+                    if b_ch == b"D":
+                        return "LEFT"
+                    if b_ch == b"M":
+                        return "ENTER"
+                    continue
+
+                # Escape sequence non-navigasi (Alt+key dll): abaikan, jangan mental ke menu sebelumnya
+                continue
 
             try:
                 char = ch.decode("utf-8", errors="ignore")
             except Exception:
                 char = ""
+
+            if not char:
+                continue
 
             # Dukungan W/S dan K/J untuk navigasi atas-bawah
             if char in ("w", "W", "k", "K"):
@@ -187,40 +316,92 @@ def read_key():
             elif char in ("s", "S", "j", "J"):
                 return "DOWN"
             elif char in ("q", "Q"):
+                _drain_paired_newline_posix(fd)
                 return "0"
-            
+            elif char.isdigit():
+                _drain_paired_newline_posix(fd)
+                return char
+
             return char
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
     except ImportError:
         # Fallback Windows
         try:
             import msvcrt
             getch_fn = getattr(msvcrt, "getch")
-            ch = getch_fn()
-            if ch in (b"\r", b"\n", b" "):
-                return "ENTER"
-            if ch == b"\x03":
-                raise KeyboardInterrupt
-            if ch in (b"\x00", b"\xe0"):
-                ch2 = getch_fn()
-                if ch2 == b"H": return "UP"
-                if ch2 == b"P": return "DOWN"
-                if ch2 == b"M": return "RIGHT"
-                if ch2 == b"K": return "LEFT"
-            char = ch.decode("utf-8", errors="ignore")
-            if char in ("w", "W", "k", "K"): return "UP"
-            if char in ("s", "S", "j", "J"): return "DOWN"
-            if char in ("q", "Q"): return "0"
-            return char
+            kbhit_fn = getattr(msvcrt, "kbhit", lambda: False)
+
+            def _win_read():
+                return _WIN_PUSHBACK.pop(0) if _WIN_PUSHBACK else getch_fn()
+
+            while True:
+                ch = _win_read()
+                if ch in (b"\r", b"\n", b" "):
+                    if ch == b"\r" and (_WIN_PUSHBACK or kbhit_fn()):
+                        nxt = _win_read()
+                        if nxt != b"\n":
+                            _WIN_PUSHBACK.append(nxt)
+                    return "ENTER"
+                if ch == b"\x03":
+                    raise KeyboardInterrupt
+                if ch in (b"\x00", b"\xe0"):
+                    ch2 = _win_read()
+                    if ch2 == b"H":
+                        return "UP"
+                    if ch2 == b"P":
+                        return "DOWN"
+                    if ch2 == b"M":
+                        return "RIGHT"
+                    if ch2 == b"K":
+                        return "LEFT"
+                    continue
+                if ch == b"\x1b":
+                    if not _WIN_PUSHBACK and not kbhit_fn():
+                        return "ESC"
+                    nxt = _win_read()
+                    if nxt in (b"[", b"O"):
+                        seq = nxt
+                        for _ in range(16):
+                            if not _WIN_PUSHBACK and not kbhit_fn():
+                                break
+                            b_ch = _win_read()
+                            seq += b_ch
+                            if 0x40 <= b_ch[0] <= 0x7E:
+                                break
+                        if seq.endswith(b"A"):
+                            return "UP"
+                        if seq.endswith(b"B"):
+                            return "DOWN"
+                        if seq.endswith(b"C"):
+                            return "RIGHT"
+                        if seq.endswith(b"D"):
+                            return "LEFT"
+                    continue
+                char = ch.decode("utf-8", errors="ignore")
+                if not char:
+                    continue
+                if char in ("w", "W", "k", "K"):
+                    return "UP"
+                if char in ("s", "S", "j", "J"):
+                    return "DOWN"
+                if char in ("q", "Q"):
+                    if _WIN_PUSHBACK or kbhit_fn():
+                        nxt = _win_read()
+                        if nxt not in (b"\r", b"\n"):
+                            _WIN_PUSHBACK.append(nxt)
+                    return "0"
+                if char.isdigit() and (_WIN_PUSHBACK or kbhit_fn()):
+                    nxt = _win_read()
+                    if nxt not in (b"\r", b"\n"):
+                        _WIN_PUSHBACK.append(nxt)
+                return char
         except Exception:
             try:
-                return input().strip()
+                return input().strip() or "ENTER"
             except Exception:
                 return "0"
     except Exception:
         try:
-            return input().strip()
+            return input().strip() or "ENTER"
         except Exception:
             return "0"
 
@@ -301,10 +482,10 @@ def run_progress_box(target, workers, safe_mode=False, verify_glm=False):
 
     def format_log_row(item):
         w_name = item.get("worker", "W-1")
-        t_str  = item.get("time", time.strftime("%H:%M:%S"))
+        t_str  = str(item.get("time", time.strftime("%H:%M:%S")))[-8:]
         status = item.get("status", "ok")
         email  = item.get("email", "")
-        lat    = item.get("latency_ms", 120)
+        lat    = int(item.get("latency_ms") or 0)
         key    = item.get("key", "")
 
         if "@" in email:
@@ -336,66 +517,66 @@ def run_progress_box(target, workers, safe_mode=False, verify_glm=False):
         )
 
     def on_progress(done, tot, ok, fail, speed, last_item=None):
-        if last_item and isinstance(last_item, dict):
-            recent_logs.append({
-                "worker": last_item.get("worker", "W-1"),
-                "time": last_item.get("created_at_wib", time.strftime("%H:%M:%S")),
-                "status": last_item.get("status", "ok"),
-                "email": last_item.get("email", ""),
-                "latency_ms": last_item.get("latency_ms", 120),
-                "key": last_item.get("api_key", ""),
-            })
-
-        now = time.time()
-        if now - last_print[0] < 0.08 and done != tot:
-            return
-        last_print[0] = now
-
-        pct = (done / tot) * 100 if tot > 0 else 0
-        bar_len = 16
-        filled = int(bar_len * (done / tot)) if tot > 0 else 0
-        bar = f"{P_MINT}{'█' * filled}{P_SLATE}{'░' * (bar_len - filled)}{C_RESET}"
-
-        rem_items = tot - done
-        eta_sec = int(rem_items / speed) if speed > 0 else 0
-        eta_str = f"{eta_sec}s" if eta_sec < 60 else f"{eta_sec // 60}m {eta_sec % 60}s"
-
-        spin_char = spinner_frames[spin_idx[0] % len(spinner_frames)]
-        spin_idx[0] += 1
-
-        succ_rate = (ok / done * 100) if done > 0 else 100.0
-        avg_lat = sum(l.get("latency_ms", 150) for l in recent_logs) / len(recent_logs) if recent_logs else 150
-
-        header_line = f"{P_PEACH}{spin_char}{C_RESET} {C_BOLD}{P_SKY}HARVEST ENGINE{C_RESET} {P_SLATE}•{C_RESET} {P_MINT}{workers} Workers Active{C_RESET} {P_SLATE}[{mode_label}]{C_RESET}"
-
-        prog_content = (
-            f"[{bar}] {P_SKY}{pct:>5.1f}%{C_RESET} ({P_WHITE}{done:>4}/{tot}{C_RESET}) "
-            f"{P_MINT}✓ {ok:<4}{C_RESET} {P_YELLOW}✗ {fail:<3}{C_RESET} "
-            f"{P_PEACH}{speed:>4.1f}/s{C_RESET} {P_SLATE}~{eta_str}{C_RESET}"
-        )
-
-        title_content = f"{P_PEACH}📡{C_RESET} {C_BOLD}{P_PINK}LIVE WORKER DISPATCHES{C_RESET} {P_SLATE}• Realtime Stream{C_RESET}"
-
-        footer_metrics = f" {P_SLATE}Rate:{C_RESET} {P_MINT}{succ_rate:>5.1f}%{C_RESET}  {P_SLATE}│ Latency:{C_RESET} {P_SKY}{avg_lat:>3.0f}ms{C_RESET}  {P_SLATE}│ Out:{C_RESET} {P_WHITE}deepai.csv{C_RESET}"
-
-        lines = [
-            box_row(header_line),
-            box_row(prog_content),
-            f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}",
-            box_row(title_content),
-        ]
-
-        for log_item in recent_logs:
-            lines.append(box_row(format_log_row(log_item)))
-
-        for _ in range(4 - len(recent_logs)):
-            lines.append(box_row(f"{P_SLATE}  ... waiting for worker dispatches ...{C_RESET}"))
-
-        lines.append(f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}")
-        lines.append(box_row(footer_metrics))
-        lines.append(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
-
         with render_lock:
+            if last_item and isinstance(last_item, dict):
+                recent_logs.append({
+                    "worker": last_item.get("worker", "W-1"),
+                    "time": last_item.get("created_at_wib", time.strftime("%H:%M:%S")),
+                    "status": last_item.get("status", "ok"),
+                    "email": last_item.get("email", ""),
+                    "latency_ms": int(last_item.get("latency_ms") or 0),
+                    "key": last_item.get("api_key", ""),
+                })
+
+            now = time.time()
+            if now - last_print[0] < 0.08 and done != tot and not first_render[0]:
+                return
+            last_print[0] = now
+
+            pct = (done / tot) * 100 if tot > 0 else 0
+            bar_len = 16
+            filled = int(bar_len * (done / tot)) if tot > 0 else 0
+            bar = f"{P_MINT}{'█' * filled}{P_SLATE}{'░' * (bar_len - filled)}{C_RESET}"
+
+            rem_items = tot - done
+            eta_sec = int(rem_items / speed) if speed > 0 else 0
+            eta_str = f"{eta_sec}s" if eta_sec < 60 else f"{eta_sec // 60}m {eta_sec % 60}s"
+
+            spin_char = spinner_frames[spin_idx[0] % len(spinner_frames)]
+            spin_idx[0] += 1
+
+            succ_rate = (ok / done * 100) if done > 0 else 100.0
+            avg_lat = sum(l.get("latency_ms", 150) for l in recent_logs) / len(recent_logs) if recent_logs else 150
+
+            header_line = f"{P_PEACH}{spin_char}{C_RESET} {C_BOLD}{P_SKY}HARVEST ENGINE{C_RESET} {P_SLATE}•{C_RESET} {P_MINT}{workers} Workers Active{C_RESET} {P_SLATE}[{mode_label}]{C_RESET}"
+
+            prog_content = (
+                f"[{bar}] {P_SKY}{pct:>5.1f}%{C_RESET} ({P_WHITE}{done:>4}/{tot}{C_RESET}) "
+                f"{P_MINT}✓ {ok:<4}{C_RESET} {P_YELLOW}✗ {fail:<3}{C_RESET} "
+                f"{P_PEACH}{speed:>4.1f}/s{C_RESET} {P_SLATE}~{eta_str}{C_RESET}"
+            )
+
+            title_content = f"{P_PEACH}📡{C_RESET} {C_BOLD}{P_PINK}LIVE WORKER DISPATCHES{C_RESET} {P_SLATE}• Realtime Stream{C_RESET}"
+
+            footer_metrics = f" {P_SLATE}Rate:{C_RESET} {P_MINT}{succ_rate:>5.1f}%{C_RESET}  {P_SLATE}│ Latency:{C_RESET} {P_SKY}{avg_lat:>3.0f}ms{C_RESET}  {P_SLATE}│ Out:{C_RESET} {P_WHITE}deepai.csv{C_RESET}"
+
+            lines = [
+                box_row(header_line),
+                box_row(prog_content),
+                f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}",
+                box_row(title_content),
+            ]
+
+            for log_item in recent_logs:
+                lines.append(box_row(format_log_row(log_item)))
+
+            for _ in range(4 - len(recent_logs)):
+                lines.append(box_row(f"{P_SLATE}  ... waiting for worker dispatches ...{C_RESET}"))
+
+            lines.append(f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}")
+            lines.append(box_row(footer_metrics))
+            lines.append(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+
             if not sys.stdout.isatty():
                 sys.stdout.write(f"\rProgress: {done}/{tot} ({pct:.1f}%) | OK: {ok} | FAIL: {fail} | Speed: {speed:.1f}/s\n")
                 sys.stdout.flush()
@@ -407,25 +588,39 @@ def run_progress_box(target, workers, safe_mode=False, verify_glm=False):
             sys.stdout.write("\n".join(lines) + "\n")
             sys.stdout.flush()
 
+    interrupted = False
     try:
         engine = run_bulk_harvest or run_bulk_farm
         if not engine:
-            print(f"\n{P_YELLOW}Engine bulk_create tidak ditemukan.{C_RESET}")
-            return
-        res = engine(count=target, workers=workers, progress_cb=on_progress, stop_event=stop_evt, verify_glm=verify_glm)
-        if first_render[0]:
             print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
-        print(f"\n{P_MINT}✨ SELESAI!{C_RESET} Berhasil panen {P_MINT}{res['ok']}{C_RESET} akun baru ({res['fail']} gagal) dalam {P_SKY}{res['elapsed']:.1f}s{C_RESET}.")
-        print(f"{P_SLATE}Data otomatis tersimpan di: {P_WHITE}{CSV_FILE}{C_RESET}")
+            print(f"\n{P_YELLOW}⚠️  Engine bulk_create tidak dapat dimuat.{C_RESET}")
+            if BULK_IMPORT_ERR:
+                print(f"{P_SLATE}Detail: {P_WHITE}{BULK_IMPORT_ERR}{C_RESET}")
+            print(f"{P_SLATE}Jalankan: {P_PEACH}pip install -r requirements.txt{C_RESET}")
+        else:
+            if sys.stdout.isatty():
+                on_progress(0, target, 0, 0, 0.0, None)
+            res = engine(count=target, workers=workers, progress_cb=on_progress, stop_event=stop_evt, verify_glm=verify_glm)
+            if first_render[0]:
+                print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+            print(f"\n{P_MINT}✨ SELESAI!{C_RESET} Berhasil panen {P_MINT}{res['ok']}{C_RESET} akun baru ({res['fail']} gagal) dalam {P_SKY}{res['elapsed']:.1f}s{C_RESET}.")
+            print(f"{P_SLATE}Data otomatis tersimpan di: {P_WHITE}{CSV_FILE}{C_RESET}")
     except KeyboardInterrupt:
+        interrupted = True
         stop_evt.set()
         print(f"\n\n{P_YELLOW}⚠️  Harvest dihentikan pengguna.{C_RESET} Akun yang sudah didapat tetap aman tersimpan di CSV.")
+    except Exception as e:
+        if first_render[0]:
+            print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+        print(f"\n\n{P_YELLOW}⚠️  Error saat harvest: {e}{C_RESET}")
 
+    flush_stdin()
     print(f"\n{P_PEACH}Tekan Enter atau tombol apa saja untuk kembali ke menu...{C_RESET}", end="", flush=True)
     try:
         read_key()
     except Exception:
         pass
+    return interrupted
 
 def menu_harvest():
     presets = [
@@ -471,10 +666,12 @@ def menu_harvest():
                 print(f" {C_BOLD}{P_PINK}⚙️  CUSTOM TARGET & WORKERS{C_RESET}\n")
                 try:
                     c_str = input(f"{P_PEACH}Target jumlah akun [contoh: 300]: {C_RESET}").strip()
-                    target = int(c_str) if c_str.isdigit() else 300
+                    target = max(1, int(c_str)) if c_str.isdigit() and int(c_str) > 0 else 300
                     w_str = input(f"{P_PEACH}Jumlah threads worker [default: 8]: {C_RESET}").strip()
-                    workers = int(w_str) if w_str.isdigit() else 8
+                    workers = max(1, int(w_str)) if w_str.isdigit() and int(w_str) > 0 else 8
+                    flush_stdin()
                 except Exception:
+                    flush_stdin()
                     break
 
             # Mode Selection: Turbo vs Verified
@@ -488,7 +685,7 @@ def menu_harvest():
                 clear_screen()
                 render_banner(stats)
                 print(f" {C_BOLD}{P_PINK}⚡ PILIH MODE HARVEST{C_RESET}")
-                print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1/2{P_SLATE}]:{C_RESET}\n")
+                print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} lalu {P_PEACH}Enter{P_SLATE}, tekan [{P_PEACH}1/2{P_SLATE}], atau [{P_PEACH}0/Esc{P_SLATE}] kembali:{C_RESET}\n")
                 for m_i, (m_num, m_title, m_desc) in enumerate(mode_options):
                     if m_i == sel_mode_idx:
                         print(f" {P_PEACH}❯{C_RESET} {P_BG_SEL}{C_BOLD}{P_PINK}[{m_num}] {m_title:<32}{C_RESET} {P_SLATE}{m_desc}{C_RESET}")
@@ -519,7 +716,9 @@ def menu_harvest():
                 batches = 5
                 per_batch = 1000
                 for b_i in range(1, batches + 1):
-                    run_progress_box(per_batch, workers, safe_mode=True, verify_glm=verify_glm)
+                    interrupted = run_progress_box(per_batch, workers, safe_mode=True, verify_glm=verify_glm)
+                    if interrupted:
+                        break
                     if b_i < batches:
                         print(f"\n{P_SKY}🌸 Cooldown 45 detik antar-batch (Batch {b_i}/{batches} selesai)...{C_RESET}")
                         for s in range(45, 0, -1):
@@ -1142,26 +1341,29 @@ def main():
 
     selected_idx = 0
 
-    while True:
-        clear_screen()
-        stats = get_csv_stats()
-        render_banner(stats)
-        render_menu([(o[0], o[1], o[2]) for o in options], selected_idx)
+    try:
+        while True:
+            clear_screen()
+            stats = get_csv_stats()
+            render_banner(stats)
+            render_menu([(o[0], o[1], o[2]) for o in options], selected_idx)
 
-        key = read_key()
-        if key == "UP":
-            selected_idx = (selected_idx - 1) % len(options)
-        elif key == "DOWN":
-            selected_idx = (selected_idx + 1) % len(options)
-        elif key in ("ENTER", "1", "2", "3", "4", "5", "0"):
-            chosen_num = key if key in ("1", "2", "3", "4", "5", "0") else options[selected_idx][0]
-            if chosen_num == "0":
-                clear_screen()
-                print(f"{P_PINK}Terima kasih telah menggunakan DeepAI Harvest TUI! 🤍{C_RESET}\n")
-                break
-            action = next(o[3] for o in options if o[0] == chosen_num)
-            if action:
-                action()
+            key = read_key()
+            if key == "UP":
+                selected_idx = (selected_idx - 1) % len(options)
+            elif key == "DOWN":
+                selected_idx = (selected_idx + 1) % len(options)
+            elif key in ("ENTER", "1", "2", "3", "4", "5", "0"):
+                chosen_num = key if key in ("1", "2", "3", "4", "5", "0") else options[selected_idx][0]
+                if chosen_num == "0":
+                    clear_screen()
+                    print(f"{P_PINK}Terima kasih telah menggunakan DeepAI Harvest TUI! 🤍{C_RESET}\n")
+                    break
+                action = next(o[3] for o in options if o[0] == chosen_num)
+                if action:
+                    action()
+    finally:
+        _restore_termios()
 
 if __name__ == "__main__":
     try:
