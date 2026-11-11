@@ -31,14 +31,65 @@ if not PROXY_FILE.exists():
     PROXY_FILE = BASE_DIR / "proxies.txt"
 DB_FILE = Path(os.environ.get("ROUTER_DB_PATH", Path.home() / ".9router/db/data.sqlite"))
 
+UUID_RE = re.compile(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+)
 API_KEY_RE = re.compile(
-    r'(?:id=["\']api-key-input-1["\']\s+value=["\']|name=["\']api-key["\']\s+value=["\'])([0-9a-fA-F\-]{32,45})["\']',
+    r'(?:id=["\']api-key-input-1["\']\s+value=["\']|name=["\']api-key["\']\s+value=["\'])([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})["\']',
     re.I
 )
 FALLBACK_KEY_RE = re.compile(
-    r'\b([0-9a-fA-F]{40})\b|\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b',
+    r'\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b',
     re.I
 )
+
+def probe_glm_key(api_key, timeout=7):
+    """
+    Test API key with GLM-5.3-Flash on DeepAI Code chat endpoint.
+    Returns: (status_code, is_valid, latency_ms, detail_str)
+    """
+    if not api_key or not UUID_RE.match(str(api_key).strip()):
+        return 400, False, 0, "Invalid UUID format"
+    t0 = time.time()
+    try:
+        r = requests.post(
+            "https://api.deepai.org/deepai_code/chat/completions",
+            headers={
+                "api-key": str(api_key).strip(),
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+            json={
+                "model": "glm-5.3-flash",
+                "messages": [{"role": "user", "content": "ping"}],
+                "stream": False,
+            },
+            timeout=timeout,
+        )
+        lat = int((time.time() - t0) * 1000)
+        is_ok = (r.status_code == 200)
+        msg = ""
+        if is_ok:
+            try:
+                data = r.json()
+                msg = data.get("choices", [{}])[0].get("message", {}).get("content", "")[:50]
+                if not msg:
+                    msg = "HTTP 200 OK"
+            except Exception:
+                msg = "HTTP 200 OK"
+        else:
+            try:
+                err_data = r.json()
+                msg = err_data.get("error", {}).get("message", r.text[:50])
+            except Exception:
+                msg = r.text[:50]
+        return r.status_code, is_ok, lat, msg
+    except requests.exceptions.Timeout:
+        lat = int((time.time() - t0) * 1000)
+        return 408, False, lat, "Timeout"
+    except Exception as e:
+        lat = int((time.time() - t0) * 1000)
+        return 0, False, lat, str(e)[:50]
 
 EMAIL_DOMAINS = ["gmail.com", "outlook.com", "icloud.com", "yahoo.com", "proton.me", "fldubai.com"]
 
@@ -135,8 +186,9 @@ def load_proxies():
     lines = [l.strip() for l in PROXY_FILE.read_text().splitlines() if l.strip() and not l.startswith("#")]
     return lines
 
-def register_single(proxy=None, max_retries=2):
-    user = f"usr_{secrets.token_hex(4)}"
+def register_single(proxy=None, max_retries=2, verify_glm=False):
+    t0 = time.time()
+    user = f"user_{secrets.token_hex(4)}"
     domain = secrets.choice(EMAIL_DOMAINS)
     email = f"{user}@{domain}"
     pw = f"Pass!{user}#2026"
@@ -165,6 +217,7 @@ def register_single(proxy=None, max_retries=2):
                 },
                 timeout=12,
             )
+            lat = int((time.time() - t0) * 1000)
             if r.status_code == 201:
                 # Direct JSON key extraction (primary path)
                 api_key = None
@@ -188,23 +241,39 @@ def register_single(proxy=None, max_retries=2):
                     except Exception:
                         pass
                 
-                if api_key:
+                if api_key and UUID_RE.match(str(api_key).strip()):
+                    clean_key = str(api_key).strip()
+                    if verify_glm:
+                        sc, is_ok, v_lat, msg = probe_glm_key(clean_key)
+                        lat += v_lat
+                        if not is_ok:
+                            return {
+                                "email": email,
+                                "password": pw,
+                                "api_key": clean_key,
+                                "status": f"glm_{sc}",
+                                "proxy": current_proxy or "direct",
+                                "created_at_wib": ts(),
+                                "latency_ms": lat,
+                            }
                     return {
                         "email": email,
                         "password": pw,
-                        "api_key": api_key,
+                        "api_key": clean_key,
                         "status": "ok",
                         "proxy": current_proxy or "direct",
                         "created_at_wib": ts(),
+                        "latency_ms": lat,
                     }
                 else:
                     return {
                         "email": email,
                         "password": pw,
                         "api_key": "",
-                        "status": "no_key",
+                        "status": "invalid_or_no_key",
                         "proxy": current_proxy or "direct",
                         "created_at_wib": ts(),
+                        "latency_ms": lat,
                     }
             elif r.status_code == 429:
                 if attempt < max_retries:
@@ -218,6 +287,7 @@ def register_single(proxy=None, max_retries=2):
                     "status": "rate_limit_429",
                     "proxy": current_proxy or "direct",
                     "created_at_wib": ts(),
+                    "latency_ms": lat,
                 }
             else:
                 if attempt < max_retries and current_proxy:
@@ -231,6 +301,7 @@ def register_single(proxy=None, max_retries=2):
                     "status": f"http_{r.status_code}",
                     "proxy": current_proxy or "direct",
                     "created_at_wib": ts(),
+                    "latency_ms": lat,
                 }
         except Exception as e:
             if attempt < max_retries:
@@ -244,6 +315,7 @@ def register_single(proxy=None, max_retries=2):
                 "status": f"err_{type(e).__name__}",
                 "proxy": current_proxy or "direct",
                 "created_at_wib": ts(),
+                "latency_ms": int((time.time() - t0) * 1000),
             }
 
     return {
@@ -253,9 +325,10 @@ def register_single(proxy=None, max_retries=2):
         "status": "exhausted_429",
         "proxy": current_proxy or "direct",
         "created_at_wib": ts(),
+        "latency_ms": int((time.time() - t0) * 1000),
     }
 
-def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=50, progress_cb=None, stop_event=None):
+def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=50, progress_cb=None, stop_event=None, verify_glm=False):
     global total_ok, total_fail, total_done
     local_buffer = []
 
@@ -268,7 +341,7 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
             break
 
         p = next(proxy_iter) if proxy_iter else None
-        res = register_single(p)
+        res = register_single(p, verify_glm=verify_glm)
         if not res or not isinstance(res, dict):
             res = {
                 "email": f"unknown_{secrets.token_hex(4)}@fldubai.com",
@@ -277,7 +350,9 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
                 "status": "err_null_response",
                 "proxy": p or "direct",
                 "created_at_wib": ts(),
+                "latency_ms": 100,
             }
+        res["worker"] = threading.current_thread().name
         append_records(res)
 
         with stats_lock:
@@ -300,7 +375,10 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
         elapsed = time.time() - start_time
         speed = cur_done / elapsed if elapsed > 0 else 0
         if progress_cb:
-            progress_cb(cur_done, target_total, cur_ok, cur_fail, speed)
+            try:
+                progress_cb(cur_done, target_total, cur_ok, cur_fail, speed, res)
+            except TypeError:
+                progress_cb(cur_done, target_total, cur_ok, cur_fail, speed)
         elif cur_done % 20 == 0 or cur_done == target_total:
             pct = (cur_done / target_total) * 100
             log(f"Progress: {cur_done}/{target_total} ({pct:.1f}%) | OK: {cur_ok} | FAIL: {cur_fail} | Speed: {speed:.1f} acc/s")
@@ -312,7 +390,7 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
             sync_new_keys_to_db(local_buffer)
         local_buffer.clear()
 
-def run_bulk_harvest(count=1000, workers=8, progress_cb=None, stop_event=None):
+def run_bulk_harvest(count=1000, workers=8, progress_cb=None, stop_event=None, verify_glm=False):
     global total_ok, total_fail, total_done
     with stats_lock:
         total_ok = 0
@@ -328,10 +406,11 @@ def run_bulk_harvest(count=1000, workers=8, progress_cb=None, stop_event=None):
 
     start_time = time.time()
     threads = []
-    for _ in range(workers):
+    for i in range(workers):
         t = threading.Thread(
             target=worker_thread,
-            args=(task_q, proxy_iter, count, start_time, 50, progress_cb, stop_event)
+            args=(task_q, proxy_iter, count, start_time, 50, progress_cb, stop_event, verify_glm),
+            name=f"W-{i+1}"
         )
         t.daemon = True
         t.start()

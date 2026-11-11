@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -32,13 +33,20 @@ except ImportError:
     requests = None
 
 try:
-    from bulk_create import run_bulk_harvest, run_bulk_farm, CSV_FILE, OUT_DIR, DB_FILE
+    from bulk_create import (
+        run_bulk_harvest, run_bulk_farm, CSV_FILE, OUT_DIR, DB_FILE,
+        probe_glm_key, UUID_RE, JSONL_FILE
+    )
 except ImportError:
     CSV_FILE = BASE_DIR / "out_deepai" / "deepai.csv"
+    JSONL_FILE = BASE_DIR / "out_deepai" / "deepai.jsonl"
     OUT_DIR = BASE_DIR / "out_deepai"
     DB_FILE = Path.home() / ".9router/db/data.sqlite"
+    UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
     run_bulk_harvest = None
     run_bulk_farm = None
+    def probe_glm_key(k, timeout=7):
+        return 0, False, 0, "No bulk_create engine"
 
 # Palet Warna (ANSI TrueColor + Fallback)
 C_RESET   = "\033[0m"
@@ -79,6 +87,14 @@ def save_config(cfg):
 def clear_screen():
     sys.stdout.write("\033[H\033[J")
     sys.stdout.flush()
+
+def strip_ansi(text):
+    return re.sub(r"\033\[[0-9;]*[a-zA-Z]", "", text)
+
+def box_row(content, width=59):
+    vlen = len(strip_ansi(content))
+    pad = max(0, width - vlen)
+    return f"{P_LAVENDER}│{C_RESET} {content}{' ' * pad} {P_LAVENDER}│{C_RESET}"
 
 def get_terminal_width():
     try:
@@ -270,24 +286,73 @@ def render_menu(options, selected_idx):
     print(f"\n{P_SLATE}───────────────────────────────────────────────────────────────{C_RESET}")
 
 # ---------------- MENU 1: QUICK HARVEST ----------------
-def run_progress_box(target, workers, safe_mode=False):
+def run_progress_box(target, workers, safe_mode=False, verify_glm=False):
     clear_screen()
+    mode_label = "GLM-Verified" if verify_glm else ("Safe Cooldown" if safe_mode else "Turbo")
     print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
-    print(f"{P_LAVENDER}│  {C_BOLD}{P_PINK}⚡ DEEPAI HARVESTING IN PROGRESS{C_RESET}{' ' * 27}{P_LAVENDER}│{C_RESET}")
-    print(f"{P_LAVENDER}│  {P_SLATE}Target:{C_RESET} {P_SKY}{target}{P_LAVENDER}  {P_SLATE}•  Workers:{C_RESET} {P_PEACH}{workers}{P_LAVENDER}  {P_SLATE}•  Mode:{C_RESET} {P_MINT}{'Safe Cooldown' if safe_mode else 'Direct Turbo'}{P_LAVENDER}  │{C_RESET}")
-    print(f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}")
 
     stop_evt = threading.Event()
     last_print = [0.0]
+    recent_logs = deque(maxlen=4)
+    spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    spin_idx = [0]
+    first_render = [True]
+    render_lock = threading.Lock()
 
-    def on_progress(done, tot, ok, fail, speed):
+    def format_log_row(item):
+        w_name = item.get("worker", "W-1")
+        t_str  = item.get("time", time.strftime("%H:%M:%S"))
+        status = item.get("status", "ok")
+        email  = item.get("email", "")
+        lat    = item.get("latency_ms", 120)
+        key    = item.get("key", "")
+
+        if "@" in email:
+            user_part, dom = email.split("@", 1)
+            masked_user = (user_part[:3] + "***") if len(user_part) > 3 else (user_part + "***")
+            masked_email = f"{masked_user}@{dom}"
+        else:
+            masked_email = email
+
+        if len(masked_email) > 17:
+            masked_email = masked_email[:14] + "..."
+
+        if key and len(key) > 11:
+            key_short = key[:8] + "..."
+        elif key:
+            key_short = key
+        else:
+            key_short = "-"
+
+        if status == "ok":
+            st_badge = f"{P_MINT}✓ 201{C_RESET}"
+        else:
+            st_badge = f"{P_YELLOW}✗ {status[:4]}{C_RESET}"
+
+        return (
+            f"{P_SLATE}{t_str}{C_RESET} {P_PEACH}[{w_name:<3}]{C_RESET} "
+            f"{st_badge} {P_WHITE}{masked_email:<17}{C_RESET} "
+            f"{P_SKY}{key_short:<11}{C_RESET} {P_SLATE}{lat:>3}ms{C_RESET}"
+        )
+
+    def on_progress(done, tot, ok, fail, speed, last_item=None):
+        if last_item and isinstance(last_item, dict):
+            recent_logs.append({
+                "worker": last_item.get("worker", "W-1"),
+                "time": last_item.get("created_at_wib", time.strftime("%H:%M:%S")),
+                "status": last_item.get("status", "ok"),
+                "email": last_item.get("email", ""),
+                "latency_ms": last_item.get("latency_ms", 120),
+                "key": last_item.get("api_key", ""),
+            })
+
         now = time.time()
-        if now - last_print[0] < 0.15 and done != tot:
+        if now - last_print[0] < 0.08 and done != tot:
             return
         last_print[0] = now
 
         pct = (done / tot) * 100 if tot > 0 else 0
-        bar_len = 26
+        bar_len = 16
         filled = int(bar_len * (done / tot)) if tot > 0 else 0
         bar = f"{P_MINT}{'█' * filled}{P_SLATE}{'░' * (bar_len - filled)}{C_RESET}"
 
@@ -295,26 +360,72 @@ def run_progress_box(target, workers, safe_mode=False):
         eta_sec = int(rem_items / speed) if speed > 0 else 0
         eta_str = f"{eta_sec}s" if eta_sec < 60 else f"{eta_sec // 60}m {eta_sec % 60}s"
 
-        sys.stdout.write(
-            f"\r\033[2K{P_LAVENDER}│{C_RESET} [{bar}] {P_SKY}{pct:>5.1f}%{C_RESET} ({P_WHITE}{done}/{tot}{C_RESET}) "
-            f"{P_MINT}✓ {ok:<4}{C_RESET} {P_YELLOW}✗ {fail:<3}{C_RESET} {P_PEACH}{speed:>4.1f}/s{C_RESET} {P_SLATE}~{eta_str}{C_RESET} "
+        spin_char = spinner_frames[spin_idx[0] % len(spinner_frames)]
+        spin_idx[0] += 1
+
+        succ_rate = (ok / done * 100) if done > 0 else 100.0
+        avg_lat = sum(l.get("latency_ms", 150) for l in recent_logs) / len(recent_logs) if recent_logs else 150
+
+        header_line = f"{P_PEACH}{spin_char}{C_RESET} {C_BOLD}{P_SKY}HARVEST ENGINE{C_RESET} {P_SLATE}•{C_RESET} {P_MINT}{workers} Workers Active{C_RESET} {P_SLATE}[{mode_label}]{C_RESET}"
+
+        prog_content = (
+            f"[{bar}] {P_SKY}{pct:>5.1f}%{C_RESET} ({P_WHITE}{done:>4}/{tot}{C_RESET}) "
+            f"{P_MINT}✓ {ok:<4}{C_RESET} {P_YELLOW}✗ {fail:<3}{C_RESET} "
+            f"{P_PEACH}{speed:>4.1f}/s{C_RESET} {P_SLATE}~{eta_str}{C_RESET}"
         )
-        sys.stdout.flush()
+
+        title_content = f"{P_PEACH}📡{C_RESET} {C_BOLD}{P_PINK}LIVE WORKER DISPATCHES{C_RESET} {P_SLATE}• Realtime Stream{C_RESET}"
+
+        footer_metrics = f" {P_SLATE}Rate:{C_RESET} {P_MINT}{succ_rate:>5.1f}%{C_RESET}  {P_SLATE}│ Latency:{C_RESET} {P_SKY}{avg_lat:>3.0f}ms{C_RESET}  {P_SLATE}│ Out:{C_RESET} {P_WHITE}deepai.csv{C_RESET}"
+
+        lines = [
+            box_row(header_line),
+            box_row(prog_content),
+            f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}",
+            box_row(title_content),
+        ]
+
+        for log_item in recent_logs:
+            lines.append(box_row(format_log_row(log_item)))
+
+        for _ in range(4 - len(recent_logs)):
+            lines.append(box_row(f"{P_SLATE}  ... waiting for worker dispatches ...{C_RESET}"))
+
+        lines.append(f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}")
+        lines.append(box_row(footer_metrics))
+        lines.append(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+
+        with render_lock:
+            if not sys.stdout.isatty():
+                sys.stdout.write(f"\rProgress: {done}/{tot} ({pct:.1f}%) | OK: {ok} | FAIL: {fail} | Speed: {speed:.1f}/s\n")
+                sys.stdout.flush()
+                return
+
+            if not first_render[0]:
+                sys.stdout.write(f"\033[{len(lines)}A\r")
+            first_render[0] = False
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
 
     try:
         engine = run_bulk_harvest or run_bulk_farm
         if not engine:
             print(f"\n{P_YELLOW}Engine bulk_create tidak ditemukan.{C_RESET}")
             return
-        res = engine(count=target, workers=workers, progress_cb=on_progress, stop_event=stop_evt)
-        print(f"\n{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+        res = engine(count=target, workers=workers, progress_cb=on_progress, stop_event=stop_evt, verify_glm=verify_glm)
+        if first_render[0]:
+            print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
         print(f"\n{P_MINT}✨ SELESAI!{C_RESET} Berhasil panen {P_MINT}{res['ok']}{C_RESET} akun baru ({res['fail']} gagal) dalam {P_SKY}{res['elapsed']:.1f}s{C_RESET}.")
         print(f"{P_SLATE}Data otomatis tersimpan di: {P_WHITE}{CSV_FILE}{C_RESET}")
     except KeyboardInterrupt:
         stop_evt.set()
         print(f"\n\n{P_YELLOW}⚠️  Harvest dihentikan pengguna.{C_RESET} Akun yang sudah didapat tetap aman tersimpan di CSV.")
-    
+
     print(f"\n{P_PEACH}Tekan Enter untuk kembali ke menu...{C_RESET}", end="", flush=True)
+    try:
+        input()
+    except Exception:
+        pass
     try:
         input()
     except Exception:
@@ -370,12 +481,26 @@ def menu_harvest():
                 except Exception:
                     break
 
+            # Mode Selection: Turbo vs Verified
+            clear_screen()
+            render_banner(stats)
+            print(f" {C_BOLD}{P_PINK}⚡ PILIH MODE HARVEST{C_RESET}\n")
+            print(f"   {P_PEACH}[1]{C_RESET} {C_BOLD}{P_WHITE}Mode Turbo (Rekomendasi){C_RESET}")
+            print(f"       {P_SLATE}Kecepatan ~6-10 acc/s. Registrasi cepat + validasi UUID otomatis.{C_RESET}\n")
+            print(f"   {P_PEACH}[2]{C_RESET} {C_BOLD}{P_WHITE}Mode Verified (GLM Deep Probe){C_RESET}")
+            print(f"       {P_SLATE}Kecepatan ~1 acc/s. Auto-test chat GLM-5.3-Flash per akun baru.{C_RESET}\n")
+            try:
+                m_choice = input(f"{P_PEACH}Pilih mode [1/2, default 1]: {C_RESET}").strip()
+            except Exception:
+                m_choice = "1"
+            verify_glm = (m_choice == "2")
+
             if chosen_num == "4":
                 # Multi-batch safe cooldown
                 batches = 5
                 per_batch = 1000
                 for b_i in range(1, batches + 1):
-                    run_progress_box(per_batch, workers, safe_mode=True)
+                    run_progress_box(per_batch, workers, safe_mode=True, verify_glm=verify_glm)
                     if b_i < batches:
                         print(f"\n{P_SKY}🌸 Cooldown 45 detik antar-batch (Batch {b_i}/{batches} selesai)...{C_RESET}")
                         for s in range(45, 0, -1):
@@ -388,7 +513,7 @@ def menu_harvest():
                         print()
                 break
             else:
-                run_progress_box(target, workers)
+                run_progress_box(target, workers, verify_glm=verify_glm)
                 break
 
 menu_farming = menu_harvest  # backward compatibility alias
@@ -432,9 +557,12 @@ class CSVDownloadHandler(BaseHTTPRequestHandler):
         if not CSV_FILE.exists():
             self.send_response(404)
             self.end_headers()
-            self.wfile.write(b"File not found")
+            self.wfile.write(b"File not found\n")
             return
-        
+
+        client_ip = self.client_address[0]
+        sys.stdout.write(f"\n {P_MINT}📥 [{datetime.now().strftime('%H:%M:%S')}] Request download dari {client_ip} diterima! Mengirim CSV...{C_RESET}\n")
+        sys.stdout.flush()
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
         self.send_header("Content-Disposition", 'attachment; filename="deepai.csv"')
@@ -442,9 +570,11 @@ class CSVDownloadHandler(BaseHTTPRequestHandler):
         self.end_headers()
         with open(CSV_FILE, "rb") as f:
             shutil.copyfileobj(f, self.wfile)
+        sys.stdout.write(f" {P_MINT}✨ File deepai.csv sukses terkirim ke {client_ip}!{C_RESET}\n")
+        sys.stdout.flush()
 
     def log_message(self, format, *args):
-        pass  # Supress console spam
+        pass  # Supress standard raw log
 
 def start_http_server():
     clear_screen()
@@ -478,25 +608,30 @@ def start_http_server():
 
     print(f" {C_BOLD}{P_MINT}🌐 INSTANT DOWNLOAD WEB SERVER AKTIF!{C_RESET}\n")
     print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
-    print(f"{P_LAVENDER}│  {P_WHITE}File CSV siap disedot langsung dari browser / terminal:{C_RESET}    {P_LAVENDER}│{C_RESET}")
-    print(f"{P_LAVENDER}│                                                             │{C_RESET}")
-    print(f"{P_LAVENDER}│  {P_PEACH}👉 Link Download Langsung:{C_RESET}                                 {P_LAVENDER}│{C_RESET}")
-    print(f"{P_LAVENDER}│     {C_BOLD}{P_SKY}{dl_url:<54}{C_RESET} {P_LAVENDER}│{C_RESET}")
-    print(f"{P_LAVENDER}│                                                             │{C_RESET}")
-    print(f"{P_LAVENDER}│  {P_PEACH}👉 Perintah Sedot di VPS Lain / Laptop:{C_RESET}                    {P_LAVENDER}│{C_RESET}")
-    print(f"{P_LAVENDER}│     {P_MINT}curl -s {dl_url} -o deepai.csv{C_RESET}  {P_LAVENDER}│{C_RESET}")
+    print(box_row(f" {P_WHITE}File CSV siap disedot langsung dari browser / terminal:{C_RESET}"))
+    print(box_row(""))
+    print(box_row(f" {P_PEACH}👉 Link Download Langsung:{C_RESET}"))
+    print(box_row(f"    {C_BOLD}{P_SKY}{dl_url}{C_RESET}"))
+    print(box_row(""))
+    print(box_row(f" {P_PEACH}👉 Perintah Sedot di VPS Lain / Laptop:{C_RESET}"))
+    print(box_row(f"    {P_MINT}curl -s {dl_url} -o deepai.csv{C_RESET}"))
     print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
-    print(f"\n{P_YELLOW}Tekan Enter atau 'q' kapan saja untuk STOP server...{C_RESET}", end="", flush=True)
+
+    print(f"\n {P_MINT}🟢 Server aktif mendengarkan di port {port}...{C_RESET}")
+    print(f" {P_PEACH}Ketik {C_BOLD}'q'{C_RESET}{P_PEACH} lalu Enter (atau Ctrl+C) untuk STOP server:{C_RESET} ", end="", flush=True)
 
     try:
-        input()
-    except Exception:
+        while True:
+            cmd = input().strip().lower()
+            if cmd in ("q", "quit", "exit", "stop", "kembali", "batal"):
+                break
+            print(f" {P_SLATE}Server masih aktif di port {port}. Ketik 'q' untuk keluar:{C_RESET} ", end="", flush=True)
+    except (KeyboardInterrupt, Exception):
         pass
     finally:
         httpd.shutdown()
         print(f"\n{P_SLATE}Web server dimatikan secara aman.{C_RESET}")
         time.sleep(0.5)
-
 def send_telegram_doc():
     clear_screen()
     stats = get_csv_stats()
@@ -616,12 +751,11 @@ def menu_share():
             if handler:
                 handler()
 
-# ---------------- MENU 4: TEST API KEY ----------------
-def menu_test_key():
+# ---------------- MENU 4: TEST & VALIDASI API KEY ----------------
+def quick_probe_single_key(stats):
     clear_screen()
-    stats = get_csv_stats()
     render_banner(stats)
-    print(f" {C_BOLD}{P_YELLOW}🧪 TEST & VALIDASI API KEY KE DEEPAI{C_RESET}\n")
+    print(f" {C_BOLD}{P_YELLOW}🧪 QUICK PROBE 1 SAMPLE KEY (GLM-5.3-FLASH){C_RESET}\n")
 
     if not stats["exists"] or stats["total"] == 0:
         print(f"{P_YELLOW}⚠️  Belum ada data akun untuk ditest.{C_RESET}")
@@ -633,51 +767,319 @@ def menu_test_key():
     with open(CSV_FILE, "r", encoding="utf-8", errors="ignore") as f:
         reader = csv.DictReader(f)
         for r in reader:
-            if r.get("status") == "ok" and r.get("api_key"):
-                latest_key = r.get("api_key")
+            k = (r.get("api_key") or "").strip()
+            if r.get("status") == "ok" and UUID_RE.match(k):
+                latest_key = k
                 latest_email = r.get("email")
 
     if not latest_key:
-        print(f"{P_YELLOW}Tidak ditemukan key dengan status 'ok' di CSV.{C_RESET}")
+        print(f"{P_YELLOW}Tidak ditemukan key UUID valid di CSV.{C_RESET}")
         input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
         return
 
-    uuid_ok = bool(re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", latest_key, re.I))
-
     print(f"{P_WHITE}Akun Sample   :{C_RESET} {P_MINT}{latest_email}{C_RESET}")
     print(f"{P_WHITE}Masked Key    :{C_RESET} {P_SKY}{mask_key(latest_key)}{C_RESET}")
-    print(f"{P_WHITE}Format UUID   :{C_RESET} {P_MINT}VALID (36 chars){C_RESET}" if uuid_ok else f"{P_YELLOW}INVALID{C_RESET}")
-    print(f"\n{P_SLATE}Mengirim probe ke API endpoint DeepAI...{C_RESET}")
+    print(f"{P_WHITE}Model Target  :{C_RESET} {P_PEACH}glm-5.3-flash{C_RESET}")
+    print(f"\n{P_SLATE}Mengirim prompt probe ke API DeepAI Code...{C_RESET}")
 
-    t0 = time.time()
-    try:
-        if not requests:
-            print(f"\n{P_YELLOW}Module requests belum terinstall.{C_RESET}")
-            input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
-            return
-        url = "https://api.deepai.org/deepai_code/chat/completions"
-        headers = {
-            "api-key": latest_key,
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0"
-        }
-        payload = {
-            "model": "deepai-chat",
-            "messages": [{"role": "user", "content": "ping"}]
-        }
-        r = requests.post(url, json=payload, headers=headers, timeout=10)
-        elapsed = (time.time() - t0) * 1000
+    sc, is_ok, lat, detail = probe_glm_key(latest_key, timeout=10)
 
-        print(f"\n{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
-        print(f"{P_LAVENDER}│  {P_WHITE}HTTP Status :{C_RESET} {P_MINT if r.status_code == 200 else P_YELLOW}{r.status_code} ({r.reason}){P_LAVENDER}                               │{C_RESET}")
-        print(f"{P_LAVENDER}│  {P_WHITE}Latency     :{C_RESET} {P_SKY}{elapsed:.0f} ms{P_LAVENDER}                                         │{C_RESET}")
-        print(f"{P_LAVENDER}│  {P_WHITE}Status Key  :{C_RESET} {P_MINT}Terdaftar & Aktif di database DeepAI{P_LAVENDER}             │{C_RESET}")
-        print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
-        print(f"\n{P_SLATE}💡 Catatan: Key siap pakai untuk routing 9Router & tools kompatibel.{C_RESET}")
-    except Exception as e:
-        print(f"\n{P_YELLOW}Error saat request: {e}{C_RESET}")
+    print(f"\n{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
+    st_color = P_MINT if is_ok else P_YELLOW
+    status_msg = "OK - Chat Berhasil" if is_ok else "FAILED"
+    row1 = f"  HTTP Status : {st_color}{sc} ({status_msg}){C_RESET}"
+    row2 = f"  Latency     : {P_SKY}{lat} ms{C_RESET}"
+    status_str = "AKTIF & SIAP PAKAI 9ROUTER" if is_ok else "DEAD / PERLU PURGE"
+    row3 = f"  Status Key  : {st_color}{status_str}{C_RESET}"
+
+    print(box_row(row1))
+    print(box_row(row2))
+    print(box_row(row3))
+    print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+    if detail:
+        print(f"\n{P_SLATE}Respon snippet: {P_WHITE}{detail[:120]}{C_RESET}")
 
     input(f"\n{P_PEACH}Tekan Enter untuk kembali...{C_RESET}")
+
+
+def test_custom_key_manual():
+    clear_screen()
+    stats = get_csv_stats()
+    render_banner(stats)
+    print(f" {C_BOLD}{P_YELLOW}🎯 TEST MANUAL CUSTOM KEY{C_RESET}\n")
+    key = input(f"{P_PEACH}Masukkan API Key DeepAI: {C_RESET}").strip()
+    if not key:
+        return
+
+    print(f"\n{P_SLATE}Menguji key ke endpoint DeepAI Code (model glm-5.3-flash)...{C_RESET}")
+    sc, is_ok, lat, detail = probe_glm_key(key, timeout=10)
+    st_color = P_MINT if is_ok else P_YELLOW
+    print(f"\nResult: HTTP {st_color}{sc}{C_RESET} | Latency: {lat}ms | Valid: {is_ok}")
+    if detail:
+        print(f"Detail: {detail}")
+    input(f"\n{P_PEACH}Tekan Enter untuk kembali...{C_RESET}")
+
+
+def run_batch_validate(workers=5):
+    clear_screen()
+    stats = get_csv_stats()
+    render_banner(stats)
+    print(f" {C_BOLD}{P_YELLOW}🧹 GLM-5.3-FLASH BATCH VALIDATOR & AUTO-PURGER{C_RESET}")
+    print(f"{P_SLATE} Endpoint: https://api.deepai.org/deepai_code/chat/completions{C_RESET}\n")
+
+    if not CSV_FILE.exists():
+        print(f"{P_YELLOW}File CSV tidak ditemukan: {CSV_FILE}{C_RESET}")
+        input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
+        return
+
+    with open(CSV_FILE, "r", encoding="utf-8", errors="ignore") as f:
+        all_rows = list(csv.DictReader(f))
+
+    if not all_rows:
+        print(f"{P_YELLOW}CSV kosong.{C_RESET}")
+        input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
+        return
+
+    print(f"{P_WHITE}Total akun di CSV :{C_RESET} {P_MINT}{len(all_rows)}{C_RESET}")
+    print(f"{P_SLATE}Validator akan menguji setiap akun dengan model GLM-5.3-Flash.{C_RESET}")
+    print(f"{P_SLATE}Akun yang mati (401/403/invalid/format non-UUID) akan otomatis di-purge.{C_RESET}\n")
+
+    confirm = input(f"{P_PEACH}Mulai validasi dan purge akun mati? [Y/n]: {C_RESET}").strip().lower()
+    if confirm == "n":
+        return
+
+    w_str = input(f"{P_PEACH}Jumlah threads worker [default: 5 (aman rate limit)]: {C_RESET}").strip()
+    workers = int(w_str) if w_str.isdigit() and int(w_str) > 0 else 5
+
+    clear_screen()
+    print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
+
+    valid_rows = []
+    purged_rows = []
+    recent_logs = deque(maxlen=4)
+    spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    spin_idx = [0]
+    first_render = [True]
+    render_lock = threading.Lock()
+    done_count = [0]
+    start_time = time.time()
+    tot = len(all_rows)
+
+    def format_val_log(item):
+        w_name = item.get("worker", "V-1")
+        t_str  = item.get("time", time.strftime("%H:%M:%S"))
+        is_ok  = item.get("is_ok", False)
+        sc     = item.get("status_code", 0)
+        email  = item.get("email", "")
+        lat    = item.get("latency_ms", 0)
+        key    = item.get("key", "")
+
+        if "@" in email:
+            u, d = email.split("@", 1)
+            masked_email = f"{u[:3]}***@{d}"
+        else:
+            masked_email = email
+        if len(masked_email) > 14:
+            masked_email = masked_email[:11] + "..."
+
+        key_short = (key[:6] + "...") if len(key) > 9 else (key or "-")
+
+        if is_ok:
+            st_badge = f"{P_MINT}✓ {sc:<3}{C_RESET}"
+            tag = f"{P_MINT}[KEEP]{C_RESET}"
+        else:
+            st_badge = f"{P_YELLOW}✗ {sc:<3}{C_RESET}"
+            tag = f"{P_YELLOW}[DEL]{C_RESET}"
+
+        return (
+            f"{P_SLATE}{t_str}{C_RESET} {P_PEACH}[{w_name:<3}]{C_RESET} "
+            f"{st_badge} {P_WHITE}{masked_email:<14}{C_RESET} "
+            f"{P_SKY}{key_short:<9}{C_RESET} {P_SLATE}{lat:>3}ms{C_RESET} {tag}"
+        )
+
+    def render_val_box():
+        done = done_count[0]
+        ok = len(valid_rows)
+        fail = len(purged_rows)
+        elapsed = time.time() - start_time
+        speed = done / elapsed if elapsed > 0 else 0
+        pct = (done / tot) * 100 if tot > 0 else 0
+
+        bar_len = 16
+        filled = int(bar_len * (done / tot)) if tot > 0 else 0
+        bar = f"{P_MINT}{'█' * filled}{P_SLATE}{'░' * (bar_len - filled)}{C_RESET}"
+
+        rem_items = tot - done
+        eta_sec = int(rem_items / speed) if speed > 0 else 0
+        eta_str = f"{eta_sec}s" if eta_sec < 60 else f"{eta_sec // 60}m {eta_sec % 60}s"
+
+        spin_char = spinner_frames[spin_idx[0] % len(spinner_frames)]
+        spin_idx[0] += 1
+
+        pass_rate = (ok / done * 100) if done > 0 else 100.0
+
+        header_line = f"{P_PEACH}{spin_char}{C_RESET} {C_BOLD}{P_SKY}GLM VALIDATOR ENGINE{C_RESET} {P_SLATE}•{C_RESET} {P_MINT}{workers} Workers{C_RESET} {P_SLATE}[GLM-5.3-Flash]{C_RESET}"
+
+        prog_content = (
+            f"[{bar}] {P_SKY}{pct:>5.1f}%{C_RESET} ({P_WHITE}{done:>4}/{tot}{C_RESET}) "
+            f"{P_MINT}✓ {ok:<4}{C_RESET} {P_YELLOW}✗ {fail:<3}{C_RESET} "
+            f"{P_PEACH}{speed:>4.1f}/s{C_RESET} {P_SLATE}~{eta_str}{C_RESET}"
+        )
+
+        title_content = f"{P_PEACH}📡{C_RESET} {C_BOLD}{P_PINK}LIVE VALIDATION STREAM{C_RESET} {P_SLATE}• GLM Status Log{C_RESET}"
+
+        footer_metrics = f" {P_SLATE}Pass:{C_RESET} {P_MINT}{pass_rate:>5.1f}%{C_RESET}  {P_SLATE}│ Valid:{C_RESET} {P_MINT}{ok}{C_RESET}  {P_SLATE}│ Purged:{C_RESET} {P_YELLOW}{fail}{C_RESET}  {P_SLATE}│ Speed:{C_RESET} {P_PEACH}{speed:.1f}/s{C_RESET}"
+
+        lines = [
+            box_row(header_line),
+            box_row(prog_content),
+            f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}",
+            box_row(title_content),
+        ]
+
+        for log_item in recent_logs:
+            lines.append(box_row(format_val_log(log_item)))
+
+        for _ in range(4 - len(recent_logs)):
+            lines.append(box_row(f"{P_SLATE}  ... probing keys with GLM ...{C_RESET}"))
+
+        lines.append(f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}")
+        lines.append(box_row(footer_metrics))
+        lines.append(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+
+        with render_lock:
+            if not sys.stdout.isatty():
+                sys.stdout.write(f"\rValidate: {done}/{tot} ({pct:.1f}%) | Valid: {ok} | Dead: {fail}\n")
+                sys.stdout.flush()
+                return
+
+            if not first_render[0]:
+                sys.stdout.write(f"\033[{len(lines)}A\r")
+            first_render[0] = False
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+
+    task_q = queue.Queue()
+    for row in all_rows:
+        task_q.put(row)
+
+    def val_worker(w_idx):
+        while True:
+            try:
+                row = task_q.get_nowait()
+            except queue.Empty:
+                break
+
+            key = (row.get("api_key") or "").strip()
+            email = row.get("email", "")
+
+            if not key or not UUID_RE.match(key):
+                is_ok = False
+                sc = 400
+                lat = 10
+            else:
+                sc, is_ok, lat, _ = probe_glm_key(key, timeout=7)
+
+            with render_lock:
+                done_count[0] += 1
+                log_entry = {
+                    "worker": f"V-{w_idx}",
+                    "time": time.strftime("%H:%M:%S"),
+                    "is_ok": is_ok,
+                    "status_code": sc,
+                    "email": email,
+                    "latency_ms": lat,
+                    "key": key,
+                }
+                recent_logs.append(log_entry)
+                if is_ok:
+                    valid_rows.append(row)
+                else:
+                    purged_rows.append(row)
+
+            render_val_box()
+            task_q.task_done()
+
+    threads = []
+    for i in range(workers):
+        t = threading.Thread(target=val_worker, args=(i + 1,))
+        t.daemon = True
+        t.start()
+        threads.append(t)
+
+    try:
+        while any(t.is_alive() for t in threads):
+            time.sleep(0.08)
+    except KeyboardInterrupt:
+        print(f"\n\n{P_YELLOW}⚠️  Validasi dihentikan pengguna.{C_RESET}")
+
+    for t in threads:
+        t.join(timeout=1.0)
+
+    render_val_box()
+
+    # Backup & Simpan hasil purge
+    bak_file = CSV_FILE.with_suffix(".csv.bak")
+    shutil.copyfile(CSV_FILE, bak_file)
+
+    fieldnames = ["email", "password", "api_key", "status", "proxy", "created_at_wib", "latency_ms"]
+    with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(valid_rows)
+
+    if JSONL_FILE.exists():
+        jsonl_bak = JSONL_FILE.with_suffix(".jsonl.bak")
+        shutil.copyfile(JSONL_FILE, jsonl_bak)
+        with open(JSONL_FILE, "w", encoding="utf-8") as f:
+            for vr in valid_rows:
+                f.write(json.dumps(vr) + "\n")
+
+    print(f"\n{P_MINT}✨ VALIDASI & PURGE SELESAI!{C_RESET}")
+    print(f" {P_WHITE}Total Akun Dicek :{C_RESET} {P_SKY}{tot}{C_RESET}")
+    print(f" {P_WHITE}Akun Valid (Kept):{C_RESET} {P_MINT}{len(valid_rows)}{C_RESET} (tersimpan di {CSV_FILE})")
+    print(f" {P_WHITE}Akun Mati (Purge):{C_RESET} {P_YELLOW}{len(purged_rows)}{C_RESET}")
+    print(f" {P_WHITE}Backup Asli       :{C_RESET} {P_SLATE}{bak_file}{C_RESET}")
+
+    if DB_FILE.exists():
+        try:
+            sync_choice = input(f"\n{P_PEACH}Sinkronkan akun valid ke 9Router sekarang? [Y/n]: {C_RESET}").strip().lower()
+        except Exception:
+            sync_choice = "n"
+        if sync_choice != "n":
+            sync_script = BASE_DIR / "sync_to_9router.py"
+            if sync_script.exists():
+                os.system(f"python3 {sync_script}")
+                os.system("pm2 reload 9router --update-env >/dev/null 2>&1 || true")
+                print(f"{P_MINT}✓ Berhasil disinkronkan ke 9Router.{C_RESET}")
+
+    input(f"\n{P_PEACH}Tekan Enter untuk kembali ke menu...{C_RESET}")
+
+
+def menu_test_key():
+    while True:
+        clear_screen()
+        stats = get_csv_stats()
+        render_banner(stats)
+        print(f" {C_BOLD}{P_YELLOW}🧪 TEST & VALIDASI API KEY (GLM-5.3-FLASH){C_RESET}\n")
+        print(f"   {P_PEACH}[1]{C_RESET} {C_BOLD}{P_WHITE}Quick Probe 1 Sample Key{C_RESET}")
+        print(f"       {P_SLATE}Uji 1 akun terakhir dengan model GLM-5.3-Flash secara live.{C_RESET}\n")
+        print(f"   {P_PEACH}[2]{C_RESET} {C_BOLD}{P_WHITE}Batch Validate & Auto-Purge CSV (Filter Akun Mati){C_RESET}")
+        print(f"       {P_SLATE}Uji SEMUA akun di CSV, hapus akun mati/invalid, sisakan yang 200 OK.{C_RESET}\n")
+        print(f"   {P_PEACH}[3]{C_RESET} {C_BOLD}{P_WHITE}Test Custom Key Manual{C_RESET}")
+        print(f"       {P_SLATE}Masukkan API key manual untuk dicek langsung.{C_RESET}\n")
+        print(f"   {P_PEACH}[0]{C_RESET} {P_WHITE}Kembali ke Menu Utama{C_RESET}\n")
+        print(f"{P_SLATE}───────────────────────────────────────────────────────────────{C_RESET}")
+
+        choice = input(f"{P_PEACH}Pilihan [0-3]: {C_RESET}").strip()
+        if choice == "0":
+            break
+        elif choice == "1":
+            quick_probe_single_key(stats)
+        elif choice == "2":
+            run_batch_validate(workers=5)
+        elif choice == "3":
+            test_custom_key_manual()
 
 # ---------------- MENU 5: SYNC KE 9ROUTER ----------------
 def menu_sync():
