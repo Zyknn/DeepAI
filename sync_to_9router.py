@@ -75,7 +75,7 @@ def sync():
                 (
                     conn_id,
                     "openai-compatible-chat-deepai",
-                    "api_key",
+                    "apikey",
                     "DeepAI",
                     email,
                     None,

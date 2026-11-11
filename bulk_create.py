@@ -109,7 +109,7 @@ def sync_new_keys_to_db(records):
                 (
                     conn_id,
                     "openai-compatible-chat-deepai",
-                    "api_key",
+                    "apikey",
                     "DeepAI",
                     email,
                     None,
