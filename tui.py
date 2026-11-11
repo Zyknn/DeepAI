@@ -106,7 +106,7 @@ def get_public_ip():
         return "127.0.0.1"
 
 def read_key():
-    """Membaca 1 tombol tanpa perlu Enter di terminal TTY POSIX."""
+    """Membaca 1 tombol (termasuk arrow keys, enter, dan shortcut) secara akurat tanpa buffer lag."""
     if not sys.stdin.isatty():
         try:
             line = sys.stdin.readline()
@@ -114,31 +114,98 @@ def read_key():
         except Exception:
             return "0"
 
-    import tty
-    import termios
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
     try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
-            if r:
-                ch2 = sys.stdin.read(1)
-                if ch2 == "[":
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == "A": return "UP"
-                    if ch3 == "B": return "DOWN"
-                    if ch3 == "C": return "RIGHT"
-                    if ch3 == "D": return "LEFT"
-            return "ESC"
-        elif ch in ("\r", "\n"):
-            return "ENTER"
-        elif ch == "\x03":  # Ctrl+C
-            raise KeyboardInterrupt
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            # Baca 1 byte pertama via OS file descriptor (bypass TextIOWrapper buffering)
+            ch = os.read(fd, 1)
+            if not ch:
+                return "0"
+            if ch == b"\x03":  # Ctrl+C
+                raise KeyboardInterrupt
+            if ch in (b"\r", b"\n", b" "):
+                return "ENTER"
+            
+            if ch == b"\x1b":
+                # Escape sequence (panah / escape / keypad / SS3)
+                seq = b"\x1b"
+                # Berikan jeda 0.15s agar packet SSH yang terpisah latensi jaringan bisa sampai
+                while True:
+                    r, _, _ = select.select([fd], [], [], 0.15)
+                    if r:
+                        chunk = os.read(fd, 16)
+                        if not chunk:
+                            break
+                        seq += chunk
+                        # Cek apakah sequence sudah selesai (panah atau keypad)
+                        if any(k in seq for k in (b"[A", b"[B", b"[C", b"[D", b"OA", b"OB", b"OC", b"OD", b"OM")):
+                            break
+                    else:
+                        break
+
+                if b"[A" in seq or b"OA" in seq or seq.endswith(b"A"):
+                    return "UP"
+                elif b"[B" in seq or b"OB" in seq or seq.endswith(b"B"):
+                    return "DOWN"
+                elif b"[C" in seq or b"OC" in seq or seq.endswith(b"C"):
+                    return "RIGHT"
+                elif b"[D" in seq or b"OD" in seq or seq.endswith(b"D"):
+                    return "LEFT"
+                elif b"OM" in seq:
+                    return "ENTER"
+                return "ESC"
+
+            try:
+                char = ch.decode("utf-8", errors="ignore")
+            except Exception:
+                char = ""
+
+            # Dukungan W/S dan K/J untuk navigasi atas-bawah
+            if char in ("w", "W", "k", "K"):
+                return "UP"
+            elif char in ("s", "S", "j", "J"):
+                return "DOWN"
+            elif char in ("q", "Q"):
+                return "0"
+            
+            return char
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except ImportError:
+        # Fallback Windows
+        try:
+            import msvcrt
+            getch_fn = getattr(msvcrt, "getch")
+            ch = getch_fn()
+            if ch in (b"\r", b"\n", b" "):
+                return "ENTER"
+            if ch == b"\x03":
+                raise KeyboardInterrupt
+            if ch in (b"\x00", b"\xe0"):
+                ch2 = getch_fn()
+                if ch2 == b"H": return "UP"
+                if ch2 == b"P": return "DOWN"
+                if ch2 == b"M": return "RIGHT"
+                if ch2 == b"K": return "LEFT"
+            char = ch.decode("utf-8", errors="ignore")
+            if char in ("w", "W", "k", "K"): return "UP"
+            if char in ("s", "S", "j", "J"): return "DOWN"
+            if char in ("q", "Q"): return "0"
+            return char
+        except Exception:
+            try:
+                return input().strip()
+            except Exception:
+                return "0"
+    except Exception:
+        try:
+            return input().strip()
+        except Exception:
+            return "0"
 
 def get_csv_stats():
     if not CSV_FILE.exists():
@@ -193,7 +260,7 @@ def render_banner(stats):
     print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
 
 def render_menu(options, selected_idx):
-    print(f"{P_SLATE} Gunakan {P_PEACH}↑/↓{P_SLATE} lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka langsung:{C_RESET}\n")
+    print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} (atau {P_PEACH}W/S{P_SLATE}) lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1-5{P_SLATE}]:{C_RESET}\n")
     for idx, (num, label, desc) in enumerate(options):
         if idx == selected_idx:
             print(f" {P_PEACH}❯{C_RESET} {P_BG_SEL}{C_BOLD}{P_PINK}[{num}] {label:<36}{C_RESET} {P_SLATE}{desc}{C_RESET}")
@@ -266,7 +333,8 @@ def menu_farming():
         clear_screen()
         stats = get_csv_stats()
         render_banner(stats)
-        print(f" {C_BOLD}{P_PINK}⚡ PILIH TARGET FARMING AKUN{C_RESET}\n")
+        print(f" {C_BOLD}{P_PINK}⚡ PILIH TARGET FARMING AKUN{C_RESET}")
+        print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} (atau {P_PEACH}W/S{P_SLATE}) lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1-5{P_SLATE}]:{C_RESET}\n")
 
         for idx, (num, label, desc, _, _) in enumerate(presets):
             if idx == sel_idx:
@@ -521,7 +589,8 @@ def menu_share():
         clear_screen()
         stats = get_csv_stats()
         render_banner(stats)
-        print(f" {C_BOLD}{P_PINK}🚀 PILIH METODE SHARE / DOWNLOAD CSV{C_RESET}\n")
+        print(f" {C_BOLD}{P_PINK}🚀 PILIH METODE SHARE / DOWNLOAD CSV{C_RESET}")
+        print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} (atau {P_PEACH}W/S{P_SLATE}) lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1-3{P_SLATE}]:{C_RESET}\n")
 
         for idx, (num, label, desc, _) in enumerate(opts):
             if idx == sel_idx:
