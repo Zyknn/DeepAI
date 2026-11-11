@@ -32,13 +32,15 @@ if not PROXY_FILE.exists():
 DB_FILE = Path(os.environ.get("ROUTER_DB_PATH", Path.home() / ".9router/db/data.sqlite"))
 
 API_KEY_RE = re.compile(
-    r'id="api-key-input-1"\s+value="([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"',
+    r'(?:id=["\']api-key-input-1["\']\s+value=["\']|name=["\']api-key["\']\s+value=["\'])([0-9a-fA-F\-]{32,45})["\']',
     re.I
 )
 FALLBACK_KEY_RE = re.compile(
-    r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
+    r'\b([0-9a-fA-F]{40})\b|\b([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b',
     re.I
 )
+
+EMAIL_DOMAINS = ["gmail.com", "outlook.com", "icloud.com", "yahoo.com", "proton.me", "fldubai.com"]
 
 file_lock = threading.Lock()
 stats_lock = threading.Lock()
@@ -135,11 +137,12 @@ def load_proxies():
 
 def register_single(proxy=None, max_retries=2):
     user = f"usr_{secrets.token_hex(4)}"
-    email = f"{user}@fldubai.com"
+    domain = secrets.choice(EMAIL_DOMAINS)
+    email = f"{user}@{domain}"
     pw = f"Pass!{user}#2026"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Origin": "https://deepai.org",
         "Referer": "https://deepai.org/",
     }
@@ -163,13 +166,27 @@ def register_single(proxy=None, max_retries=2):
                 timeout=12,
             )
             if r.status_code == 201:
-                prof = s.get("https://deepai.org/dashboard/profile", timeout=12)
-                m = API_KEY_RE.search(prof.text)
-                api_key = m.group(1) if m else None
+                # Direct JSON key extraction (primary path)
+                api_key = None
+                try:
+                    res_json = r.json()
+                    api_key = res_json.get("key")
+                except Exception:
+                    api_key = None
+
+                # Fallback to profile scrape if JSON key missing
                 if not api_key:
-                    keys = FALLBACK_KEY_RE.findall(prof.text)
-                    if keys:
-                        api_key = keys[0]
+                    try:
+                        prof = s.get("https://deepai.org/dashboard/profile", timeout=12)
+                        m = API_KEY_RE.search(prof.text)
+                        api_key = m.group(1) if m else None
+                        if not api_key:
+                            keys = FALLBACK_KEY_RE.findall(prof.text)
+                            if keys:
+                                k = keys[0]
+                                api_key = k if isinstance(k, str) else (k[0] or k[1])
+                    except Exception:
+                        pass
                 
                 if api_key:
                     return {
@@ -203,6 +220,10 @@ def register_single(proxy=None, max_retries=2):
                     "created_at_wib": ts(),
                 }
             else:
+                if attempt < max_retries and current_proxy:
+                    current_proxy = None
+                    time.sleep(0.5)
+                    continue
                 return {
                     "email": email,
                     "password": pw,
@@ -291,7 +312,7 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
             sync_new_keys_to_db(local_buffer)
         local_buffer.clear()
 
-def run_bulk_farm(count=1000, workers=8, progress_cb=None, stop_event=None):
+run_bulk_farm = run_bulk_harvest
     global total_ok, total_fail, total_done
     with stats_lock:
         total_ok = 0

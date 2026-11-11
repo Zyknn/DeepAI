@@ -1,8 +1,8 @@
 <div align="center">
 
-# DeepAI Account Farm & 9Router Integrator
+# DeepAI Account Harvest & 9Router Integrator
 
-High-performance automated account farming, auto-harvesting API key, and instant SQLite ingestion pipeline for **[DeepAI](https://deepai.org)** into **[9Router](https://github.com/alienxp03/9router)**.
+High-performance automated account harvesting, auto-harvesting API key, and instant SQLite ingestion pipeline for **[DeepAI](https://deepai.org)** into **[9Router](https://github.com/alienxp03/9router)**.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
@@ -16,13 +16,13 @@ High-performance automated account farming, auto-harvesting API key, and instant
 
 ## About
 
-High-performance automated account farming, auto-harvesting API key, and instant SQLite ingestion pipeline for DeepAI into 9Router. Designed for generating thousands of verified accounts without browser overhead and loading them directly into multi-key LLM proxies for free inference (`deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`).
+High-performance automated account harvesting, auto-harvesting API key, and instant SQLite ingestion pipeline for DeepAI into 9Router. Designed for generating thousands of verified accounts without browser overhead and loading them directly into multi-key LLM proxies for free inference (`deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`).
 
 ### Benchmark Produksi
 
 | Metrik | Hasil Uji Lapangan |
 | :--- | :--- |
-| **Throughput Farming** | ~2.7 akun / detik (12 concurrent worker threads) |
+| **Throughput harvesting** | ~2.7 akun / detik (12 concurrent worker threads) |
 | **Kapasitas Batch** | 2.000 akun selesai dalam **~12 menit** (1.994 sukses, 6 timeout/retry) |
 | **Throughput Ingest DB** | 2.000+ akun terindeks ke SQLite dalam **< 1.5 detik** |
 | **Model LLM Aktif** | `deepai/glm-5.3-flash`, `deepai/gpt-oss-120b` |
@@ -33,23 +33,23 @@ High-performance automated account farming, auto-harvesting API key, and instant
 
 ```text
 [ Disposable Mailbox ] (api.mail.tm)
-          │
-          ▼
+ │
+ ▼
 [ Proxy Pool / Direct VPS ] (Rotasi per thread)
-          │
-          ▼
+ │
+ ▼
 [ Direct HTTP Register ] ──► POST https://api.deepai.org/daily-time-sync/registration/
-          │
-          ▼
+ │
+ ▼
 [ Harvest UUID API Key ] ──► GET https://deepai.org/profile/ (Session Auth)
-          │
-          ├──► CSV Output    : out_deepai/deepai.csv
-          ├──► JSONL Output  : out_deepai/deepai.jsonl
-          └──► SQLite Ingest : ~/.9router/db/data.sqlite (Table: providerConnections)
-                                       │
-                                       ▼
-                       [ 9Router Multi-Key Load Balancer ]
-                               (Port 20128 : Chat SSE)
+ │
+ ├──► CSV Output : out_deepai/deepai.csv
+ ├──► JSONL Output : out_deepai/deepai.jsonl
+ └──► SQLite Ingest : ~/.9router/db/data.sqlite (Table: providerConnections)
+ │
+ ▼
+ [ 9Router Multi-Key Load Balancer ]
+ (Port 20128 : Chat SSE)
 ```
 
 ---
@@ -58,25 +58,25 @@ High-performance automated account farming, auto-harvesting API key, and instant
 
 ```text
 .
-├── main.py               # Launcher utama / entrypoint TUI
-├── tui.py                # Interactive Pastel TUI (Farming, stats, instant share, test)
-├── bulk_create.py         # Engine utama: multi-threaded direct HTTP farming & live sync
-├── sync_to_9router.py     # Standalone ingest tool: CSV -> 9Router SQLite DB
-├── deepai.py              # Engine registrasi alternatif via Chromium Playwright
-├── proxylist.py           # Helper proxy rotation pool
-├── tempmail.py            # Helper mailbox generator & token handler (mail.tm)
-├── util.py                # Logging helper & sanitasi proxy string
-├── proxies.example.txt    # Contoh struktur file konfigurasi proxy
-├── requirements.txt       # Daftar dependensi Python
-├── LICENSE                # Lisensi resmi MIT (Copyright Zykuan)
+├── main.py # Launcher utama / entrypoint TUI
+├── tui.py # Interactive TUI (harvesting, stats, instant share, test)
+├── bulk_create.py # Engine utama: multi-threaded direct HTTP harvesting & live sync
+├── sync_to_9router.py # Standalone ingest tool: CSV -> 9Router SQLite DB
+├── deepai.py # Engine registrasi alternatif via Chromium Playwright
+├── proxylist.py # Helper proxy rotation pool
+├── tempmail.py # Helper mailbox generator & token handler (mail.tm)
+├── util.py # Logging helper & sanitasi proxy string
+├── proxies.example.txt # Contoh struktur file konfigurasi proxy
+├── requirements.txt # Daftar dependensi Python
+├── LICENSE # Lisensi resmi MIT (Copyright Zykuan)
 └── README.md
 ```
 
 ---
 
-## Quickstart (Interactive Pastel TUI)
+## Quickstart (Interactive TUI)
 
-Cara paling praktis menjalankan farming dan manajemen akun adalah menggunakan antarmuka interaktif TUI:
+Cara paling praktis menjalankan harvesting dan manajemen akun adalah menggunakan antarmuka interaktif TUI:
 
 ```bash
 git clone https://github.com/Zyknn/DeepAI.git
@@ -84,8 +84,8 @@ cd DeepAI
 python3 main.py
 ```
 
-Antarmuka pastel siap pakai tanpa konfigurasi tambahan:
-- **[1] Quick Farm:** Pilih target (100 / 500 / 1000 / 5000 multi-batch safe cooldown)
+Antarmuka siap pakai tanpa konfigurasi tambahan:
+- **[1] Quick Harvest:** Pilih target (100 / 500 / 1000 / 5000 multi-batch safe cooldown)
 - **[2] Cek Statistik:** Ringkasan akun valid, gagal, ukuran CSV, dan 5 akun terakhir
 - **[3] Auto Kirim / Share CSV:** Instant download web server & auto upload ke Telegram
 - **[4] Test API Key:** Verifikasi format key & probe live ke endpoint DeepAI
@@ -117,15 +117,15 @@ http://user:password@proxy2.example.com:8080
 
 > **Catatan Direct VPS:** Registrasi dan inferensi ke DeepAI dapat berjalan secara direct tanpa proxy selama subnet IP VPS tidak masuk daftar blokir Cloudflare.
 
-### 3. Eksekusi Farming Massal
+### 3. Eksekusi harvesting Massal
 
 Jalankan `bulk_create.py` dengan menentukan jumlah akun dan worker threads:
 
 ```bash
-# Farm 2.000 akun dengan 12 threads:
+# Harvest 2.000 akun dengan 12 threads:
 python3 bulk_create.py --count 2000 --workers 12
 
-# Farm skala kecil untuk pengujian (5 akun, 2 threads):
+# Harvest skala kecil untuk pengujian (5 akun, 2 threads):
 python3 bulk_create.py --count 5 --workers 2
 ```
 
@@ -139,7 +139,7 @@ Semua credential akun, email, password, dan API Key tersimpan otomatis di:
 
 ### Sinkronisasi ke Database SQLite
 
-Jika Anda menjalankan 9Router pada VPS yang sama, akun hasil farming dapat langsung di-ingest ke tabel `providerConnections`:
+Jika Anda menjalankan 9Router pada VPS yang sama, akun hasil harvesting dapat langsung di-ingest ke tabel `providerConnections`:
 
 ```bash
 # Default target DB: ~/.9router/db/data.sqlite
@@ -166,12 +166,12 @@ Bagian ini merangkum masalah teknis nyata yang sering ditemui di lapangan besert
 * **Gejala:** Database SQLite menyimpan ribuan akun di tabel `providerConnections`, namun halaman dashboard UI 9Router (`/dashboard/providers`) hanya menampilkan 5 akun.
 * **Penyebab:** Frontend 9Router memfilter koneksi berdasarkan nilai field strict `c.authType === "apikey"`. Jika script ingest menyimpan nilai `authType` sebagai `"api_key"` (memakai underscore `_`), baris tersebut tetap tersimpan di SQLite namun disaring/dilewati oleh komponen UI.
 * **Solusi Perbaikan:**
-  Jalankan perintah SQL berikut untuk menormalisasi nilai `authType`:
-  ```bash
-  sqlite3 ~/.9router/db/data.sqlite "UPDATE providerConnections SET authType = 'apikey' WHERE provider = 'openai-compatible-chat-deepai' AND authType = 'api_key';"
-  pm2 reload 9router
-  ```
-  *(Script `bulk_create.py` dan `sync_to_9router.py` pada repositori ini sudah diperbarui dengan standar `authType = 'apikey'`)*.
+ Jalankan perintah SQL berikut untuk menormalisasi nilai `authType`:
+ ```bash
+ sqlite3 ~/.9router/db/data.sqlite "UPDATE providerConnections SET authType = 'apikey' WHERE provider = 'openai-compatible-chat-deepai' AND authType = 'api_key';"
+ pm2 reload 9router
+ ```
+ *(Script `bulk_create.py` dan `sync_to_9router.py` pada repositori ini sudah diperbarui dengan standar `authType = 'apikey'`)*.
 
 ---
 
@@ -179,19 +179,19 @@ Bagian ini merangkum masalah teknis nyata yang sering ditemui di lapangan besert
 
 * **Gejala:** Pemanggilan endpoint chat streaming melempar error `401 Unauthorized` atau menganggap request sebagai guest user tanpa kuota.
 * **Penyebab:** Endpoint upstream DeepAI (`https://api.deepai.org/deepai_code`) mewajibkan header autentikasi bertipe:
-  ```http
-  api-key: [UUID_API_KEY]
-  ```
-  DeepAI **menolak** header standar OpenAI `Authorization: Bearer [UUID_API_KEY]`.
+ ```http
+ api-key: [UUID_API_KEY]
+ ```
+ DeepAI **menolak** header standar OpenAI `Authorization: Bearer [UUID_API_KEY]`.
 * **Solusi Perbaikan:**
-  Pastikan adapter/proxy Anda (misal pada `open-sse/executors/default.js` 9Router) memetakan header khusus DeepAI:
-  ```javascript
-  if (targetUrl.includes("deepai.org")) {
-    headers["api-key"] = connection.apiKey;
-    delete headers["authorization"];
-    delete headers["Authorization"];
-  }
-  ```
+ Pastikan adapter/proxy Anda (misal pada `open-sse/executors/default.js` 9Router) memetakan header khusus DeepAI:
+ ```javascript
+ if (targetUrl.includes("deepai.org")) {
+ headers["api-key"] = connection.apiKey;
+ delete headers["authorization"];
+ delete headers["Authorization"];
+ }
+ ```
 
 ---
 
@@ -200,9 +200,9 @@ Bagian ini merangkum masalah teknis nyata yang sering ditemui di lapangan besert
 * **Gejala:** Permintaan registrasi gagal dengan status HTTP `403` atau menerima respon Cloudflare challenge page.
 * **Penyebab:** IP subnet terkena rate-limiting atau terdeteksi oleh Cloudflare bot detection.
 * **Solusi Perbaikan:**
-  - Masukkan daftar proxy residential atau rotating HTTP proxy ke file `proxies_live.txt`.
-  - Kurangi intensitas thread jika menggunakan direct IP (misal `--workers 4`).
-  - Script telah dilengkapi auto-retry dan fallback proxy per thread worker.
+ - Masukkan daftar proxy residential atau rotating HTTP proxy ke file `proxies_live.txt`.
+ - Kurangi intensitas thread jika menggunakan direct IP (misal `--workers 4`).
+ - Script telah dilengkapi auto-retry dan fallback proxy per thread worker.
 
 ---
 
@@ -211,8 +211,8 @@ Bagian ini merangkum masalah teknis nyata yang sering ditemui di lapangan besert
 * **Gejala:** Muncul pesan database terkunci saat menggunakan jumlah worker thread yang sangat banyak.
 * **Penyebab:** Concurrency limit SQLite pada mode write bersamaan dari thread-thread Python.
 * **Solusi Perbaikan:**
-  - Script `bulk_create.py` telah dilengkapi mekanisme in-memory batching (commit per 50 akun sekaligus) yang dilindungi `threading.Lock()`.
-  - Opsi alternatif: Lakukan farming murni ke CSV terlebih dahulu, lalu jalankan `sync_to_9router.py` setelah seluruh proses registrasi selesai.
+ - Script `bulk_create.py` telah dilengkapi mekanisme in-memory batching (commit per 50 akun sekaligus) yang dilindungi `threading.Lock()`.
+ - Opsi alternatif: Lakukan harvesting murni ke CSV terlebih dahulu, lalu jalankan `sync_to_9router.py` setelah seluruh proses registrasi selesai.
 
 ---
 
