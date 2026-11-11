@@ -1,2 +1,3 @@
+# Zero mandatory dependencies — runs out-of-the-box with Python 3 stdlib.
+# Optional (only needed inside a venv for connection pooling or SOCKS proxy):
 requests>=2.31.0
-playwright>=1.40.0

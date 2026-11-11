@@ -19,6 +19,7 @@ import socketserver
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -596,7 +597,7 @@ def run_progress_box(target, workers, safe_mode=False, verify_glm=False):
             print(f"\n{P_YELLOW}⚠️  Engine bulk_create tidak dapat dimuat.{C_RESET}")
             if BULK_IMPORT_ERR:
                 print(f"{P_SLATE}Detail: {P_WHITE}{BULK_IMPORT_ERR}{C_RESET}")
-            print(f"{P_SLATE}Jalankan: {P_PEACH}pip install -r requirements.txt{C_RESET}")
+            print(f"{P_SLATE}Pastikan bulk_create.py ada di folder yang sama (Python >=3.10 stdlib).{C_RESET}")
         else:
             if sys.stdout.isatty():
                 on_progress(0, target, 0, 0, 0.0, None)
@@ -885,15 +886,54 @@ def send_telegram_doc():
     caption = f"🌸 DeepAI Accounts Harvested\n🌾 Total Akun: {stats['ok']:,} Valid Key\n📁 File: deepai.csv ({stats['size_str']})"
 
     try:
-        if not requests:
-            print(f"\n{P_YELLOW}Module requests belum terinstall.{C_RESET}")
-            input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
-            return
         url = f"https://api.telegram.org/bot{token}/sendDocument"
-        with open(CSV_FILE, "rb") as f:
-            files = {"document": ("deepai.csv", f, "text/csv")}
-            data = {"chat_id": chat_id, "caption": caption}
-            res = requests.post(url, files=files, data=data, timeout=30).json()
+        if requests is not None:
+            with open(CSV_FILE, "rb") as f:
+                files = {"document": ("deepai.csv", f, "text/csv")}
+                data = {"chat_id": chat_id, "caption": caption}
+                res = requests.post(url, files=files, data=data, timeout=30).json()
+        else:
+            boundary = f"----DeepAIBoundary{os.urandom(8).hex()}"
+            file_bytes = CSV_FILE.read_bytes()
+            parts = []
+            for k, v in {"chat_id": chat_id, "caption": caption}.items():
+                parts.append(
+                    (
+                        f"--{boundary}\r\n"
+                        f'Content-Disposition: form-data; name="{k}"\r\n\r\n'
+                        f"{v}\r\n"
+                    ).encode("utf-8")
+                )
+            parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="document"; filename="deepai.csv"\r\n'
+                    f"Content-Type: text/csv\r\n\r\n"
+                ).encode("utf-8")
+                + file_bytes
+                + b"\r\n"
+            )
+            parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+            body = b"".join(parts)
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(len(body)),
+                    "User-Agent": "DeepAI-TUI/1.0",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    res = json.loads(resp.read().decode("utf-8", errors="replace"))
+            except urllib.error.HTTPError as e:
+                raw_err = e.read().decode("utf-8", errors="replace")
+                try:
+                    res = json.loads(raw_err)
+                except Exception:
+                    res = {"ok": False, "description": f"HTTP {e.code}: {raw_err[:120]}"}
         
         if res.get("ok"):
             print(f"\n{P_MINT}✨ Berhasil terkirim ke Telegram chat {chat_id}!{C_RESET}")

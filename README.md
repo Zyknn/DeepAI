@@ -67,7 +67,7 @@ High-performance automated account harvesting, auto-harvesting API key, and inst
 ├── tempmail.py        # Helper mailbox generator & token handler (mail.tm)
 ├── util.py            # Logging helper & sanitasi proxy string
 ├── proxies.example.txt# Contoh struktur file konfigurasi proxy
-├── requirements.txt   # Daftar dependensi Python
+├── requirements.txt   # Dependensi opsional (tool jalan tanpa pip/venv via Python stdlib)
 ├── LICENSE            # Lisensi resmi MIT (Copyright Zykuan)
 └── README.md
 ```
@@ -98,14 +98,15 @@ Antarmuka siap pakai tanpa konfigurasi tambahan:
 
 ### 1. Kloning Repositori & Setup Environment
 
+Tool ini menggunakan **Python 3 standard library secara native** — tidak wajib `pip install` atau virtual environment. Cukup clone dan jalankan langsung:
+
 ```bash
 git clone https://github.com/Zyknn/DeepAI.git
 cd DeepAI
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+python3 deepai.py
 ```
+
+*(Opsional: jika ingin memakai `requests` untuk SOCKS proxy / connection pooling di distro PEP 668 yang memunculkan `externally-managed-environment`, pakai `sudo apt install python3-requests` atau `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`.)*
 
 ### 2. Konfigurasi Proxy (Opsional)
 

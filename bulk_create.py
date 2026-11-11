@@ -1,25 +1,35 @@
 #!/usr/bin/env python3
 """
-Harvest massal akun DeepAI via Direct HTTP (requests).
+Harvest massal akun DeepAI via Direct HTTP (requests atau Python stdlib fallback).
 Multi-threaded queue-based worker dengan progress real-time dan auto-sync ke 9Router.
 """
 
 import csv
+import gzip
+import http.cookiejar
 import json
 import os
 import queue
 import re
 import secrets
+import socket
 import sqlite3
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
 from itertools import cycle
 from pathlib import Path
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
 BASE_DIR = Path(__file__).parent.resolve()
 OUT_DIR = BASE_DIR / "out_deepai"
@@ -43,6 +53,122 @@ FALLBACK_KEY_RE = re.compile(
     re.I
 )
 
+
+def _normalize_proxy(p):
+    if not p:
+        return None
+    p = str(p).strip()
+    if not p:
+        return None
+    if "://" not in p:
+        parts = p.split(":")
+        if len(parts) == 4:
+            host, port, user, pw = parts
+            return f"http://{user}:{pw}@{host}:{port}"
+        if len(parts) == 2:
+            return f"http://{p}"
+        return f"http://{p}"
+    return p
+
+
+def _decode_http_body(raw: bytes, headers) -> str:
+    enc = ""
+    if headers is not None:
+        enc = str(headers.get("Content-Encoding") or "").lower()
+    if "gzip" in enc:
+        try:
+            raw = gzip.decompress(raw)
+        except Exception:
+            pass
+    elif "deflate" in enc:
+        try:
+            raw = zlib.decompress(raw)
+        except Exception:
+            try:
+                raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+            except Exception:
+                pass
+    return raw.decode("utf-8", errors="replace")
+
+
+def _is_timeout_exc(exc) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    if requests is not None and isinstance(exc, requests.exceptions.Timeout):
+        return True
+    if isinstance(exc, urllib.error.URLError) and isinstance(getattr(exc, "reason", None), (TimeoutError, socket.timeout)):
+        return True
+    return "timed out" in str(exc).lower()
+
+
+class _StdlibResponse:
+    def __init__(self, status_code: int, text: str):
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class _StdlibSession:
+    def __init__(self):
+        self.headers = {}
+        self.proxies = {}
+        self.cookie_jar = http.cookiejar.CookieJar()
+
+    def _build_opener(self):
+        handlers: list[urllib.request.BaseHandler] = [urllib.request.HTTPCookieProcessor(self.cookie_jar)]
+        if self.proxies:
+            proxy_url = self.proxies.get("https") or self.proxies.get("http")
+            if proxy_url and str(proxy_url).lower().startswith("socks"):
+                raise RuntimeError("SOCKS proxy requires requests+PySocks")
+            handlers.append(urllib.request.ProxyHandler(self.proxies))
+        return urllib.request.build_opener(*handlers)
+
+    def request(self, method: str, url: str, data=None, json_body=None, headers=None, timeout=12):
+        req_headers = dict(self.headers)
+        if headers:
+            req_headers.update(headers)
+        req_headers.setdefault("Accept-Encoding", "gzip")
+
+        body_bytes = None
+        if json_body is not None:
+            body_bytes = json.dumps(json_body).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+        elif data is not None:
+            if isinstance(data, dict):
+                body_bytes = urllib.parse.urlencode(data).encode("utf-8")
+                req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+            elif isinstance(data, str):
+                body_bytes = data.encode("utf-8")
+            else:
+                body_bytes = data
+
+        req = urllib.request.Request(url, data=body_bytes, headers=req_headers, method=method)
+        opener = self._build_opener()
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                return _StdlibResponse(resp.status, _decode_http_body(raw, resp.headers))
+        except urllib.error.HTTPError as e:
+            raw = b""
+            try:
+                raw = e.read()
+            except Exception:
+                pass
+            return _StdlibResponse(e.code, _decode_http_body(raw, e.headers))
+
+    def get(self, url: str, headers=None, timeout=12):
+        return self.request("GET", url, headers=headers, timeout=timeout)
+
+    def post(self, url: str, data=None, json=None, headers=None, timeout=12):
+        return self.request("POST", url, data=data, json_body=json, headers=headers, timeout=timeout)
+
+
+def _new_session():
+    return requests.Session() if requests is not None else _StdlibSession()
+
+
 def probe_glm_key(api_key, timeout=7):
     """
     Test API key with GLM-5.3-Flash on DeepAI Code chat endpoint.
@@ -52,7 +178,8 @@ def probe_glm_key(api_key, timeout=7):
         return 400, False, 0, "Invalid UUID format"
     t0 = time.time()
     try:
-        r = requests.post(
+        sess = _new_session()
+        r = sess.post(
             "https://api.deepai.org/deepai_code/chat/completions",
             headers={
                 "api-key": str(api_key).strip(),
@@ -84,11 +211,10 @@ def probe_glm_key(api_key, timeout=7):
             except Exception:
                 msg = r.text[:50]
         return r.status_code, is_ok, lat, msg
-    except requests.exceptions.Timeout:
-        lat = int((time.time() - t0) * 1000)
-        return 408, False, lat, "Timeout"
     except Exception as e:
         lat = int((time.time() - t0) * 1000)
+        if _is_timeout_exc(e):
+            return 408, False, lat, "Timeout"
         return 0, False, lat, str(e)[:50]
 
 EMAIL_DOMAINS = ["gmail.com", "outlook.com", "icloud.com", "yahoo.com", "proton.me", "fldubai.com"]
@@ -199,12 +325,15 @@ def register_single(proxy=None, max_retries=2, verify_glm=False):
         "Referer": "https://deepai.org/",
     }
 
-    current_proxy = proxy
+    current_proxy = _normalize_proxy(proxy)
     for attempt in range(max_retries + 1):
-        s = requests.Session()
+        s = _new_session()
         s.headers.update(headers)
         if current_proxy:
-            s.proxies = {"http": current_proxy, "https": current_proxy}
+            if requests is None and str(current_proxy).lower().startswith("socks"):
+                current_proxy = None
+            else:
+                s.proxies = {"http": current_proxy, "https": current_proxy}
         
         try:
             r = s.post(
