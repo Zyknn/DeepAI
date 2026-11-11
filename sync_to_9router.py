@@ -5,13 +5,14 @@ Sync akun dari deepai.csv ke data.sqlite 9Router.
 import csv
 import json
 import sqlite3
+import sys
 import uuid
 from datetime import datetime, timezone
 import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent.resolve()
-CSV_FILE = BASE_DIR / "out_deepai" / "deepai.csv"
+CSV_FILE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else (BASE_DIR / "out_deepai" / "deepai.csv")
 DB_FILE = Path(os.environ.get("ROUTER_DB_PATH", Path.home() / ".9router/db/data.sqlite"))
 
 def sync():
