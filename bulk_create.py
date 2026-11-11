@@ -312,7 +312,7 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
             sync_new_keys_to_db(local_buffer)
         local_buffer.clear()
 
-run_bulk_farm = run_bulk_harvest
+def run_bulk_harvest(count=1000, workers=8, progress_cb=None, stop_event=None):
     global total_ok, total_fail, total_done
     with stats_lock:
         total_ok = 0
@@ -365,6 +365,10 @@ run_bulk_farm = run_bulk_harvest
         "elapsed": elapsed,
         "speed": total_done / elapsed if elapsed > 0 else 0
     }
+
+
+# Backward compatibility alias
+run_bulk_farm = run_bulk_harvest
 
 def main():
     import argparse
