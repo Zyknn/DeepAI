@@ -14,11 +14,11 @@ High-performance automated account farming, auto-harvesting API key, and instant
 
 ---
 
-## ⚡ Overview
+## About
 
-Tool automasi berkecepatan tinggi untuk menghasilkan ribuan akun DeepAI aktif beserta harvesting API key langsung melalui endpoint registrasi sinkronisasi tanpa overhead browser. Dirancang untuk diintegrasikan secara instan ke load balancer model AI seperti 9Router untuk inferensi LLM gratis (`deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`).
+High-performance automated account farming, auto-harvesting API key, and instant SQLite ingestion pipeline for DeepAI into 9Router. Designed for generating thousands of verified accounts without browser overhead and loading them directly into multi-key LLM proxies for free inference (`deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`).
 
-### 📊 Benchmark Produksi
+### Benchmark Produksi
 
 | Metrik | Hasil Uji Lapangan |
 | :--- | :--- |
@@ -29,7 +29,7 @@ Tool automasi berkecepatan tinggi untuk menghasilkan ribuan akun DeepAI aktif be
 
 ---
 
-## 🏗️ Architecture Pipeline
+## Architecture Pipeline
 
 ```text
 [ Disposable Mailbox ] (api.mail.tm)
@@ -54,7 +54,7 @@ Tool automasi berkecepatan tinggi untuk menghasilkan ribuan akun DeepAI aktif be
 
 ---
 
-## 📁 Struktur Direktori
+## Project Structure
 
 ```text
 .
@@ -72,7 +72,7 @@ Tool automasi berkecepatan tinggi untuk menghasilkan ribuan akun DeepAI aktif be
 
 ---
 
-## 🚀 Panduan Instalasi & Penggunaan
+## Installation & Setup
 
 ### 1. Kloning Repositori & Setup Environment
 
@@ -114,7 +114,7 @@ Semua credential akun, email, password, dan API Key tersimpan otomatis di:
 
 ---
 
-## 🔌 Integrasi ke 9Router
+## 9Router Integration
 
 ### Sinkronisasi ke Database SQLite
 
@@ -136,7 +136,7 @@ pm2 reload 9router --update-env
 
 ---
 
-## 🛠️ Catatan Lapangan & Solusi Masalah (Troubleshooting)
+## Troubleshooting
 
 Bagian ini merangkum masalah teknis nyata yang sering ditemui di lapangan beserta langkah solusinya:
 
@@ -195,7 +195,7 @@ Bagian ini merangkum masalah teknis nyata yang sering ditemui di lapangan besert
 
 ---
 
-## 👤 Author & Maintainer
+## Author
 
 Crafted with high attention to performance and resilience by:
 
@@ -204,7 +204,7 @@ Crafted with high attention to performance and resilience by:
 
 ---
 
-## 📄 Lisensi
+## License
 
 Proyek ini dirilis di bawah lisensi resmi **[MIT License](LICENSE)**.
 Bebas dimodifikasi, didistribusikan, dan digunakan untuk keperluan riset otomasi dan pengujian sistem.
