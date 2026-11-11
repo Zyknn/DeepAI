@@ -290,9 +290,11 @@ def main():
     for t in threads:
         t.join()
 
-    # Final DB sync & reload
-    os.system("python3 /home/ubuntu/deepai/sync_to_9router.py")
-    os.system("pm2 reload 9router --update-env")
+    # Final DB sync & reload jika 9Router terpasang lokal
+    sync_script = BASE_DIR / "sync_to_9router.py"
+    if sync_script.exists() and DB_FILE.exists():
+        os.system(f"python3 {sync_script}")
+        os.system("pm2 reload 9router --update-env 2>/dev/null || true")
 
     elapsed = time.time() - start_time
     log(f"SELESAI! Target: {args.count} | OK: {total_ok} | FAIL: {total_fail} | Durasi: {elapsed:.1f}s")
