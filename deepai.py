@@ -1,38 +1,159 @@
 """Farming akun DeepAI (deepai.org) — email acak via api.mail.tm (tempmail).
 
-Alur (diverifikasi live 2026-11-11):
-  1. Bikin mailbox sekali-pakai via TempmailInbox.provision()  (api.mail.tm, gratis)
+Alur:
+  1. Ambil domain aktif dari api.mail.tm atau fallback domain.
   2. Buka deepai.org -> openLogin() -> toggleAuthOption('signup')
   3. Isi email/password/confirm -> submitAuth() -> POST api.deepai.org/daily-time-sync/registration/
      Balas 201 + session cookie (tanpa verifikasi email, tanpa captcha).
   4. Ambil API key asli (UUID) dari input.api-password di /dashboard/profile.
 
-CATATAN PENTING:
+CATATAN:
   - API key akun free VALID tapi endpoint model balas 402 (butuh Pro).
     /deepai_code/chat/completions pun balas 403 social_login_required utk akun email baru.
-    Modul ini tetap menyimpan key utk arsip; gunakan bila akun punya akses Pro/Google.
-  - curl/requests diblok CloudFront 403 -> wajib browser nyata (Chromium).
-
-GANTI dari versi asli: pemasok email Temfex (temfex.com, butuh TEMFEX_API_KEY)
-diganti jadi tempmail api.mail.tm (gratis, tanpa API key).
-
-GitHub : https://github.com/HihuProject
-Dev    : HihuProject
 """
 from __future__ import annotations
 
+import argparse
+import csv
+import json
 import re
+import secrets
+import shutil
+import string
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from .tempmail import TempmailInbox, TempmailError
-from .util import log, ts, parse_proxy, human_delay, load_lines
 
 API_KEY_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
+class TempmailError(Exception):
+    pass
+
+
+class DeepAIError(RuntimeError):
+    pass
+
+
+class TempmailInbox:
+    """Manajer mailbox sekali-pakai via api.mail.tm dengan auto-fallback domain."""
+    def __init__(self, api_base: str = "https://api.mail.tm"):
+        self.api_base = api_base.rstrip("/")
+        self._cached_domain: str | None = None
+
+    def get_domain(self) -> str:
+        if self._cached_domain:
+            return self._cached_domain
+        try:
+            req = urllib.request.Request(f"{self.api_base}/domains", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                members = data.get("hydra:member", [])
+                if members:
+                    self._cached_domain = members[0]["domain"]
+                    return self._cached_domain
+        except Exception:
+            pass
+        self._cached_domain = "fldubai.com"
+        return self._cached_domain
+
+    def provision(self) -> str:
+        domain = self.get_domain()
+        username = f"usr_{secrets.token_hex(5)}"
+        email = f"{username}@{domain}"
+        pw = f"P@{secrets.token_hex(6)}"
+
+        # Usaha registrasi ke mail.tm jika kuota IP mengizinkan
+        try:
+            payload = json.dumps({"address": email, "password": pw}).encode("utf-8")
+            req = urllib.request.Request(
+                f"{self.api_base}/accounts",
+                data=payload,
+                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res = json.loads(resp.read().decode())
+                addr = res.get("address")
+                return str(addr) if addr else email
+        except Exception:
+            # DeepAI tidak memvalidasi aktivasi email secara live, email domain aktif langsung valid
+            return email
+
+
+def ts() -> str:
+    wib = timezone(timedelta(hours=7))
+    return datetime.now(wib).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log(msg: str, level: str = "INFO"):
+    print(f"[{ts()}] [{level}] {msg}")
+
+
+def parse_proxy(p: str | None) -> dict | None:
+    if not p:
+        return None
+    p = p.strip()
+    if "://" not in p:
+        parts = p.split(":")
+        if len(parts) == 4:
+            host, port, user, pw = parts
+            return {"server": f"http://{host}:{port}", "username": user, "password": pw}
+        elif len(parts) == 2:
+            return {"server": f"http://{p}"}
+    u = urllib.parse.urlparse(p)
+    res = {"server": f"{u.scheme}://{u.hostname}:{u.port}"}
+    if u.username:
+        res["username"] = u.username
+    if u.password:
+        res["password"] = u.password
+    return res
+
+
+def human_delay(min_s: float, max_s: float):
+    sec = secrets.SystemRandom().uniform(min_s, max_s)
+    time.sleep(sec)
+
+
+def load_lines(path: str | Path | None) -> list[str]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [line.strip() for line in p.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
+def append_csv(path: Path, header: list[str], row: dict):
+    exists = path.exists()
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def append_jsonl(path: Path, row: dict):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+class ProxyPool:
+    def __init__(self, proxies: list[str], validate: bool = True):
+        self.proxies = proxies
+        self.idx = 0
+
+    def next(self) -> str | None:
+        if not self.proxies:
+            return None
+        p = self.proxies[self.idx % len(self.proxies)]
+        self.idx += 1
+        return p
+
+
 def gen_password(n: int = 20) -> str:
-    import secrets
-    import string
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_"
     while True:
         pw = "".join(secrets.choice(alphabet) for _ in range(n))
@@ -41,20 +162,20 @@ def gen_password(n: int = 20) -> str:
             return pw
 
 
-class DeepAIError(RuntimeError):
-    pass
-
-
 def signup_one(inbox: TempmailInbox, proxy: dict | None = None,
                headless: bool = True, password: str | None = None) -> dict:
     """Daftar 1 akun DeepAI. Kembalikan {email,password,api_key,status}."""
     from playwright.sync_api import sync_playwright
 
-    email = inbox.provision()          # mailbox sekali-pakai dari api.mail.tm
+    email = inbox.provision()
     password = password or gen_password()
     res: dict = {"email": email, "password": password, "api_key": "", "status": "", "error": ""}
 
-    launch_kw = {"headless": headless}
+    launch_kw: dict = {"headless": headless}
+    chrome_bin = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+    if chrome_bin:
+        launch_kw["executable_path"] = chrome_bin
+
     if proxy:
         launch_kw["proxy"] = {"server": proxy.get("server")}
         if proxy.get("username"):
@@ -76,6 +197,7 @@ def signup_one(inbox: TempmailInbox, proxy: dict | None = None,
             page.fill("#user-password", password)
             page.fill("#confirm-user-password", password)
             page.evaluate("submitAuth(new Event('submit'))")
+
             # tunggu modal tutup / error muncul
             for _ in range(30):
                 page.wait_for_timeout(500)
@@ -114,10 +236,8 @@ def signup_one(inbox: TempmailInbox, proxy: dict | None = None,
 def cmd_register(a) -> int:
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    from .proxylist import ProxyPool
-    from .util import append_csv, append_jsonl
 
-    inbox = TempmailInbox()               # pemasok email acak (api.mail.tm)
+    inbox = TempmailInbox()
     proxies = load_lines(a.proxy_file)
     pool = ProxyPool(proxies, validate=not a.no_validate_proxy) if proxies else None
 
@@ -126,7 +246,7 @@ def cmd_register(a) -> int:
     for i in range(a.count):
         raw_proxy = pool.next() if pool else None
         proxy = parse_proxy(raw_proxy) if raw_proxy else None
-        log(f"[{i+1}/{a.count}] daftar akun DeepAI (email mail.tm)...")
+        log(f"[{i+1}/{a.count}] daftar akun DeepAI (email {inbox.get_domain()})...")
         try:
             r = signup_one(inbox, proxy=proxy, headless=not a.headed)
         except Exception as e:
@@ -137,7 +257,8 @@ def cmd_register(a) -> int:
         append_csv(out_dir / "deepai.csv", CSV, r)
         if r.get("api_key"):
             ok += 1
-            log(f"OK {r['email']} key={r['api_key'][:8]}...")
+            masked_key = r['api_key'][:8] + "..."
+            log(f"OK {r['email']} key={masked_key}")
         else:
             fail += 1
             log(f"GAGAL {r.get('email','?')} status={r.get('status')} err={r.get('error','')}", "ERROR")
@@ -148,8 +269,7 @@ def cmd_register(a) -> int:
 
 
 def main(argv=None):
-    import argparse
-    ap = argparse.ArgumentParser(prog="relayfarm.deepai", description="Farm akun DeepAI via email tempmail (api.mail.tm)")
+    ap = argparse.ArgumentParser(prog="deepai", description="Farm akun DeepAI via email tempmail (api.mail.tm)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     reg = sub.add_parser("register", help="daftar N akun")
     reg.add_argument("--count", type=int, default=5)

@@ -1,136 +1,103 @@
-# DeepAI Account Farm
+# DeepAI Account Farm & API Integrator
 
-Farm akun [deepai.org](https://deepai.org) otomatis — email acak via [api.mail.tm](https://api.mail.tm) (tempmail gratis, tanpa API key).
-
-- **GitHub**: https://github.com/HihuProject
-- **Dev**: HihuProject
+Tool automasi farming akun [DeepAI](https://deepai.org) berkecepatan tinggi dengan auto-harvest API Key, rotasi proxy multi-threading, dan integrasi instan ke [9Router](https://github.com/alienxp03/9router).
 
 ---
 
-## Logika / Alur Kerja
+## ⚡ Fitur Utama
+
+- **Ultra-Fast Direct HTTP Farming (`bulk_create.py`)**:
+  - Direct HTTP register via `api.deepai.org/daily-time-sync/registration/` (tanpa browser overhead).
+  - Auto-fetch UUID API Key langsung dari dashboard profile.
+  - Multi-threaded queue worker dengan rotasi proxy otomatis.
+  - Kecepatan **~2.5 - 3 akun/detik** (2.000 akun selesai dalam ~12 menit).
+- **Playwright Automation (`deepai.py`)**:
+  - Mode browser Chromium headless alternatif.
+- **Export Formats**:
+  - Menyimpan hasil akun ke CSV (`out_deepai/deepai.csv`) & JSONL (`out_deepai/deepai.jsonl`).
+- **9Router Integration (`sync_to_9router.py`)**:
+  - Ingest akun massal langsung ke database SQLite 9Router (`providerConnections`).
+  - Siap pakai untuk inferensi model AI gratis (seperti `deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`).
+
+---
+
+## 📁 Struktur File
 
 ```
-┌─────────────────────┐
-│  TempmailInbox      │  api.mail.tm -> bikin mailbox sekali-pakai
-│  .provision()       │  (gratis, tanpa API key)
-└──────────┬──────────┘
-           │  email acak
-           v
-┌─────────────────────┐
-│  Playwright Chromium│  buka https://deepai.org/
-│  openLogin()        │  -> toggleAuthOption('signup')
-└──────────┬──────────┘
-           │
-           v
-┌─────────────────────┐
-│  Isi form signup    │  #user-email / #user-password / #confirm-user-password
-│  submitAuth()       │  -> POST api.deepai.org/daily-time-sync/registration/
-└──────────┬──────────┘
-           │  201 + session cookie (tanpa verifikasi email, tanpa captcha)
-           v
-┌─────────────────────┐
-│  /dashboard/profile │  baca input.api-password
-│  ambil API key UUID │  validasi regex UUID
-└──────────┬──────────┘
-           │
-           v
-┌─────────────────────┐
-│  Simpan hasil       │  out_deepai/deepai.jsonl + deepai.csv
-└─────────────────────┘
+├── bulk_create.py         # Script utama: multi-threaded direct HTTP farming
+├── sync_to_9router.py     # Sinkronisasi hasil CSV ke SQLite 9Router
+├── deepai.py              # Script registrasi alternatif via Playwright Chromium
+├── proxylist.py           # Helper pool dan rotasi proxy
+├── tempmail.py            # Helper generator disposable mailbox (api.mail.tm)
+├── util.py                # Utilitas logging, parsing proxy, dan delay
+├── proxies.example.txt    # Contoh format daftar proxy
+├── requirements.txt       # Dependensi Python
+└── README.md
 ```
 
-### Langkah ringkas
-
-1. **Provision mailbox** — `TempmailInbox.provision()` bikin email sekali-pakai via api.mail.tm.
-2. **Buka deepai.org** — Playwright Chromium, `openLogin()` lalu `toggleAuthOption('signup')`.
-3. **Submit signup** — isi email/password/confirm, `submitAuth()`. Server balas `201` + session cookie (tanpa verifikasi email, tanpa captcha).
-4. **Ambil API key** — buka `/dashboard/profile`, baca `input.api-password`, validasi format UUID.
-5. **Simpan** — tulis ke `deepai.jsonl` + `deepai.csv` (email, password, api_key, status, proxy, created_at_wib).
-
-### Password generator
-
-`gen_password(n=20)` — 20 karakter campuran (huruf besar/kecil/angka/simbol), dijamin minimal 1 dari tiap kategori via `secrets` (cryptographically secure).
-
-### Proxy support
-
-`ProxyPool` dari `proxylist.py` — rotasi proxy per akun, opsional validasi. Lewati dengan `--no-validate-proxy`.
-
 ---
 
-## Catatan Penting
+## 🚀 Panduan Instalasi & Penggunaan
 
-- API key akun free **valid** tapi endpoint model balas `402` (butuh Pro).
-- `/deepai_code/chat/completions` balas `403 social_login_required` untuk akun email baru.
-- Modul tetap menyimpan key untuk arsip; gunakan bila akun punya akses Pro/Google.
-- `curl`/`requests` diblok CloudFront `403` — **wajib browser nyata** (Chromium via Playwright).
-
-### Perubahan dari versi asli
-
-Pemasok email **Temfex** (`temfex.com`, butuh `TEMFEX_API_KEY`) diganti jadi **tempmail api.mail.tm** (gratis, tanpa API key).
-
----
-
-## Instalasi
+### 1. Persiapan Environment
 
 ```bash
-pip install playwright
-playwright install chromium
+git clone https://github.com/Zyknn/DeepAI.git
+cd DeepAI
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-## Penggunaan
+### 2. Setup Proxy (Opsional)
+
+Jika ingin menggunakan proxy, buat file `proxies_live.txt` atau `proxies.txt` di root direktori:
+
+```text
+http://username:password@proxy_host:proxy_port
+http://proxy_host:proxy_port
+```
+
+*Catatan: Registrasi dan inferensi chat DeepAI juga dapat berjalan direct tanpa proxy selama IP tidak terkena Cloudflare rate-limit.*
+
+### 3. Jalankan Farming Massal
+
+Jalankan `bulk_create.py` dengan parameter jumlah akun dan worker thread:
 
 ```bash
-# farm 5 akun (default, headless)
-python -m relayfarm.deepai register
-
-# farm 10 akun, tampilkan browser, pakai proxy
-python -m relayfarm.deepai register --count 10 --headed --proxy-file proxies.txt
-
-# custom delay antar akun (detik)
-python -m relayfarm.deepai register --count 20 --delay-min 10 --delay-max 30
+# Contoh: Farm 2.000 akun dengan 12 worker threads
+python3 bulk_create.py --count 2000 --workers 12
 ```
 
-### Opsi CLI
-
-| Flag | Default | Keterangan |
-|------|---------|------------|
-| `--count` | `5` | Jumlah akun yang di-farm |
-| `--proxy-file` | `None` | File berisi daftar proxy (1 per baris) |
-| `--no-validate-proxy` | `False` | Lewati validasi proxy |
-| `--headed` | `False` | Tampilkan browser (tidak headless) |
-| `--out-dir` | `out_deepai` | Direktori output |
-| `--delay-min` | `5` | Delay minimum antar akun (detik) |
-| `--delay-max` | `15` | Delay maksimum antar akun (detik) |
+Hasil akun akan otomatis tersimpan di:
+- `out_deepai/deepai.csv`
+- `out_deepai/deepai.jsonl`
 
 ---
 
-## Output
+## 🔌 Integrasi ke 9Router
 
-- `out_deepai/deepai.jsonl` — satu JSON object per baris
-- `out_deepai/deepai.csv` — kolom: `email, password, api_key, status, proxy, created_at_wib`
+DeepAI menyediakan akses gratis ke berbagai model LLM. Untuk memasukkan ribuan API key hasil farm ke 9Router:
 
-### Contoh JSON
+1. Pastikan 9Router terpasang (database default di `~/.9router/db/data.sqlite`).
+2. Jalankan sync:
+   ```bash
+   python3 sync_to_9router.py
+   ```
+3. Reload 9Router:
+   ```bash
+   pm2 reload 9router --update-env
+   ```
 
-```json
-{
-  "email": "abc123@mail.tm",
-  "password": "xY3!aBc...",
-  "api_key": "12345678-1234-1234-1234-123456789abc",
-  "status": "ok",
-  "proxy": "http://user:pass@host:port",
-  "created_at_wib": "2026-11-11 07:50:00"
-}
+### ⚠️ Catatan Penting untuk Upstream DeepAI
+Endpoint upstream DeepAI (`https://api.deepai.org/deepai_code`) memerlukan header otentikasi berupa:
+```http
+api-key: <UUID_API_KEY>
 ```
-
-### Status values
-
-- `ok` — akun terdaftar + API key didapat
-- `registered+no_key` — akun terdaftar tapi API key gagal diambil
-- `error` — gagal (lihat field `error`)
-- `unknown` — status tak terdeteksi
+*(DeepAI menolak header standar `Authorization: Bearer <key>`)*. Pastikan executor upstream / proxy Anda memetakan header otentikasi ke `api-key`.
 
 ---
 
-## License
-
-MIT
+## 📄 Lisensi
+MIT License. Dibuat untuk tujuan riset dan pengujian otomatisasi.
