@@ -1,4 +1,4 @@
-"""Farming akun DeepAI (deepai.org) — email acak via api.mail.tm (tempmail).
+"""Harvest akun DeepAI (deepai.org) — email acak via api.mail.tm (tempmail).
 
 Alur:
   1. Ambil domain aktif dari api.mail.tm atau fallback domain.
@@ -269,7 +269,7 @@ def cmd_register(a) -> int:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="deepai", description="Farm akun DeepAI via email tempmail (api.mail.tm)")
+    ap = argparse.ArgumentParser(prog="deepai", description="Harvest akun DeepAI via email tempmail (api.mail.tm)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     reg = sub.add_parser("register", help="daftar N akun")
     reg.add_argument("--count", type=int, default=5)

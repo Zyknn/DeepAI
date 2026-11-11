@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DeepAI Account Farmer & Management
+DeepAI Account Harvest & Management
 Entrypoint to interactive TUI
 """
 

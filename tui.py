@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🌸 DeepAI Farmer TUI - Pastel Edition
+🌸 DeepAI Harvest TUI
 Interactive Text User Interface for DeepAI Account Harvesting & Management.
 Crafted by Zykuan (@Zyknn)
 """
@@ -32,21 +32,22 @@ except ImportError:
     requests = None
 
 try:
-    from bulk_create import run_bulk_farm, CSV_FILE, OUT_DIR, DB_FILE
+    from bulk_create import run_bulk_harvest, run_bulk_farm, CSV_FILE, OUT_DIR, DB_FILE
 except ImportError:
     CSV_FILE = BASE_DIR / "out_deepai" / "deepai.csv"
     OUT_DIR = BASE_DIR / "out_deepai"
     DB_FILE = Path.home() / ".9router/db/data.sqlite"
+    run_bulk_harvest = None
     run_bulk_farm = None
 
-# Palet Warna Pastel (ANSI TrueColor + Fallback)
+# Palet Warna (ANSI TrueColor + Fallback)
 C_RESET   = "\033[0m"
 C_BOLD    = "\033[1m"
 C_DIM     = "\033[2m"
 C_ITALIC  = "\033[3m"
 C_UNDER   = "\033[4m"
 
-# Pastel Hex Colors:
+# Hex Colors:
 P_LAVENDER = "\033[38;2;197;180;227m"  # #c5b4e3 - Utama / Header
 P_MINT     = "\033[38;2;168;218;181m"  # #a8dab5 - Sukses / OK
 P_PEACH    = "\033[38;2;255;190;152m"  # #ffbe98 - Prompt / Aksen Seleksi
@@ -254,7 +255,7 @@ def render_banner(stats):
     size_str = stats['size_str'] if stats['exists'] else "0 KB"
     
     print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
-    print(f"{P_LAVENDER}│  {C_BOLD}{P_PINK}🌸 DEEPAI FARMER TUI{C_RESET}  {P_SLATE}•{C_RESET}  {P_LAVENDER}Pastel Edition  {P_SLATE}•{C_RESET}  {P_SKY}Zykuan (@Zyknn){P_LAVENDER}  │{C_RESET}")
+    print(f"{P_LAVENDER}│  {C_BOLD}{P_PINK}🌸 DEEPAI HARVEST TUI{C_RESET}  {P_SLATE}•{C_RESET}  {P_SKY}Zykuan (@Zyknn){C_RESET}{' ' * 18}{P_LAVENDER}│{C_RESET}")
     print(f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}")
     print(f"{P_LAVENDER}│  {P_SLATE}📁 File:{C_RESET} {P_WHITE}out_deepai/deepai.csv{P_LAVENDER}   {P_SLATE}│{C_RESET} {P_MINT}🌾 Akun:{C_RESET} {P_MINT}{tot_str}{P_LAVENDER} ({size_str}) │{C_RESET}")
     print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
@@ -268,11 +269,11 @@ def render_menu(options, selected_idx):
             print(f"   {P_PEACH}[{num}]{C_RESET} {P_WHITE}{label:<36}{C_RESET} {P_SLATE}{desc}{C_RESET}")
     print(f"\n{P_SLATE}───────────────────────────────────────────────────────────────{C_RESET}")
 
-# ---------------- MENU 1: QUICK FARM ----------------
+# ---------------- MENU 1: QUICK HARVEST ----------------
 def run_progress_box(target, workers, safe_mode=False):
     clear_screen()
     print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
-    print(f"{P_LAVENDER}│  {C_BOLD}{P_PINK}⚡ DEEPAI FARMING IN PROGRESS{C_RESET}                              {P_LAVENDER}│{C_RESET}")
+    print(f"{P_LAVENDER}│  {C_BOLD}{P_PINK}⚡ DEEPAI HARVESTING IN PROGRESS{C_RESET}{' ' * 27}{P_LAVENDER}│{C_RESET}")
     print(f"{P_LAVENDER}│  {P_SLATE}Target:{C_RESET} {P_SKY}{target}{P_LAVENDER}  {P_SLATE}•  Workers:{C_RESET} {P_PEACH}{workers}{P_LAVENDER}  {P_SLATE}•  Mode:{C_RESET} {P_MINT}{'Safe Cooldown' if safe_mode else 'Direct Turbo'}{P_LAVENDER}  │{C_RESET}")
     print(f"{P_LAVENDER}├─────────────────────────────────────────────────────────────┤{C_RESET}")
 
@@ -295,22 +296,23 @@ def run_progress_box(target, workers, safe_mode=False):
         eta_str = f"{eta_sec}s" if eta_sec < 60 else f"{eta_sec // 60}m {eta_sec % 60}s"
 
         sys.stdout.write(
-            f"\r{P_LAVENDER}│{C_RESET} [{bar}] {P_SKY}{pct:>5.1f}%{C_RESET} ({P_WHITE}{done}/{tot}{C_RESET}) "
+            f"\r\033[2K{P_LAVENDER}│{C_RESET} [{bar}] {P_SKY}{pct:>5.1f}%{C_RESET} ({P_WHITE}{done}/{tot}{C_RESET}) "
             f"{P_MINT}✓ {ok:<4}{C_RESET} {P_YELLOW}✗ {fail:<3}{C_RESET} {P_PEACH}{speed:>4.1f}/s{C_RESET} {P_SLATE}~{eta_str}{C_RESET} "
         )
         sys.stdout.flush()
 
     try:
-        if not run_bulk_farm:
+        engine = run_bulk_harvest or run_bulk_farm
+        if not engine:
             print(f"\n{P_YELLOW}Engine bulk_create tidak ditemukan.{C_RESET}")
             return
-        res = run_bulk_farm(count=target, workers=workers, progress_cb=on_progress, stop_event=stop_evt)
+        res = engine(count=target, workers=workers, progress_cb=on_progress, stop_event=stop_evt)
         print(f"\n{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
         print(f"\n{P_MINT}✨ SELESAI!{C_RESET} Berhasil panen {P_MINT}{res['ok']}{C_RESET} akun baru ({res['fail']} gagal) dalam {P_SKY}{res['elapsed']:.1f}s{C_RESET}.")
         print(f"{P_SLATE}Data otomatis tersimpan di: {P_WHITE}{CSV_FILE}{C_RESET}")
     except KeyboardInterrupt:
         stop_evt.set()
-        print(f"\n\n{P_YELLOW}⚠️  Farming dihentikan pengguna.{C_RESET} Akun yang sudah didapat tetap aman tersimpan di CSV.")
+        print(f"\n\n{P_YELLOW}⚠️  Harvest dihentikan pengguna.{C_RESET} Akun yang sudah didapat tetap aman tersimpan di CSV.")
     
     print(f"\n{P_PEACH}Tekan Enter untuk kembali ke menu...{C_RESET}", end="", flush=True)
     try:
@@ -318,7 +320,7 @@ def run_progress_box(target, workers, safe_mode=False):
     except Exception:
         pass
 
-def menu_farming():
+def menu_harvest():
     presets = [
         ("1", "100 Akun   • Quick Test", "8 threads, estimasi ~15-20 detik", 100, 8),
         ("2", "500 Akun   • Fast Batch", "8 threads, estimasi ~1-2 menit", 500, 8),
@@ -333,7 +335,7 @@ def menu_farming():
         clear_screen()
         stats = get_csv_stats()
         render_banner(stats)
-        print(f" {C_BOLD}{P_PINK}⚡ PILIH TARGET FARMING AKUN{C_RESET}")
+        print(f" {C_BOLD}{P_PINK}⚡ PILIH TARGET HARVEST AKUN{C_RESET}")
         print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} (atau {P_PEACH}W/S{P_SLATE}) lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1-5{P_SLATE}]:{C_RESET}\n")
 
         for idx, (num, label, desc, _, _) in enumerate(presets):
@@ -389,6 +391,8 @@ def menu_farming():
                 run_progress_box(target, workers)
                 break
 
+menu_farming = menu_harvest  # backward compatibility alias
+
 # ---------------- MENU 2: LIHAT STATISTIK & DATA ----------------
 def menu_stats():
     clear_screen()
@@ -398,7 +402,7 @@ def menu_stats():
 
     if not stats["exists"] or stats["total"] == 0:
         print(f"{P_YELLOW}⚠️  Belum ada data akun di {CSV_FILE}.{C_RESET}")
-        print(f"{P_SLATE}Silakan jalankan menu [1] Quick Farm terlebih dahulu.{C_RESET}")
+        print(f"{P_SLATE}Silakan jalankan menu [1] Quick Harvest terlebih dahulu.{C_RESET}")
     else:
         print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
         print(f"{P_LAVENDER}│  {P_WHITE}Total Akun Terdaftar  :{C_RESET} {P_MINT}{stats['total']:,} akun{P_LAVENDER}                               │{C_RESET}")
@@ -707,7 +711,7 @@ def menu_sync():
 # ---------------- MAIN CONTROLLER ----------------
 def main():
     options = [
-        ("1", "⚡ Quick Farm Akun", "Pilih target 100/500/1000/5000 & threads", menu_farming),
+        ("1", "⚡ Quick Harvest Akun", "Pilih target 100/500/1000/5000 & threads", menu_harvest),
         ("2", "📊 Cek Statistik & Data", "Lihat total akun, status, dan 5 akun terakhir", menu_stats),
         ("3", "🚀 Auto Kirim / Share CSV", "Instant Web Server & kirim Telegram doc", menu_share),
         ("4", "🧪 Test Validasi API Key", "Uji coba kirim chat live ke DeepAI API", menu_test_key),
@@ -732,7 +736,7 @@ def main():
             chosen_num = key if key in ("1", "2", "3", "4", "5", "0") else options[selected_idx][0]
             if chosen_num == "0":
                 clear_screen()
-                print(f"{P_PINK}Terima kasih telah menggunakan DeepAI Farmer TUI! 🤍{C_RESET}\n")
+                print(f"{P_PINK}Terima kasih telah menggunakan DeepAI Harvest TUI! 🤍{C_RESET}\n")
                 break
             action = next(o[3] for o in options if o[0] == chosen_num)
             if action:

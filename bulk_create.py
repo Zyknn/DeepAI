@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Farming massal akun DeepAI via Direct HTTP (requests).
+Harvest massal akun DeepAI via Direct HTTP (requests).
 Multi-threaded queue-based worker dengan progress real-time dan auto-sync ke 9Router.
 """
 
@@ -378,7 +378,7 @@ def main():
     args = parser.parse_args()
 
     log(f"Memulai bulk creation target={args.count} workers={args.workers}")
-    res = run_bulk_farm(args.count, args.workers)
+    res = run_bulk_harvest(args.count, args.workers)
     log(f"SELESAI! Target: {res['count']} | OK: {res['ok']} | FAIL: {res['fail']} | Durasi: {res['elapsed']:.1f}s")
 
 if __name__ == "__main__":
