@@ -58,6 +58,8 @@ High-performance automated account farming, auto-harvesting API key, and instant
 
 ```text
 .
+├── main.py               # Launcher utama / entrypoint TUI
+├── tui.py                # Interactive Pastel TUI (Farming, stats, instant share, test)
 ├── bulk_create.py         # Engine utama: multi-threaded direct HTTP farming & live sync
 ├── sync_to_9router.py     # Standalone ingest tool: CSV -> 9Router SQLite DB
 ├── deepai.py              # Engine registrasi alternatif via Chromium Playwright
@@ -72,7 +74,26 @@ High-performance automated account farming, auto-harvesting API key, and instant
 
 ---
 
-## Installation & Setup
+## Quickstart (Interactive Pastel TUI)
+
+Cara paling praktis menjalankan farming dan manajemen akun adalah menggunakan antarmuka interaktif TUI:
+
+```bash
+git clone https://github.com/Zyknn/DeepAI.git
+cd DeepAI
+python3 main.py
+```
+
+Antarmuka pastel siap pakai tanpa konfigurasi tambahan:
+- **[1] Quick Farm:** Pilih target (100 / 500 / 1000 / 5000 multi-batch safe cooldown)
+- **[2] Cek Statistik:** Ringkasan akun valid, gagal, ukuran CSV, dan 5 akun terakhir
+- **[3] Auto Kirim / Share CSV:** Instant download web server & auto upload ke Telegram
+- **[4] Test API Key:** Verifikasi format key & probe live ke endpoint DeepAI
+- **[5] Sync ke 9Router:** Ingest langsung ke SQLite 9Router lokal
+
+---
+
+## Manual CLI Usage (Headless / Scripting)
 
 ### 1. Kloning Repositori & Setup Environment
 

@@ -234,11 +234,13 @@ def register_single(proxy=None, max_retries=2):
         "created_at_wib": ts(),
     }
 
-def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=50):
+def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=50, progress_cb=None, stop_event=None):
     global total_ok, total_fail, total_done
     local_buffer = []
 
     while True:
+        if stop_event and stop_event.is_set():
+            break
         try:
             _ = task_q.get_nowait()
         except queue.Empty:
@@ -274,9 +276,11 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
                 sync_new_keys_to_db(local_buffer)
             local_buffer.clear()
 
-        if cur_done % 20 == 0 or cur_done == target_total:
-            elapsed = time.time() - start_time
-            speed = cur_done / elapsed if elapsed > 0 else 0
+        elapsed = time.time() - start_time
+        speed = cur_done / elapsed if elapsed > 0 else 0
+        if progress_cb:
+            progress_cb(cur_done, target_total, cur_ok, cur_fail, speed)
+        elif cur_done % 20 == 0 or cur_done == target_total:
             pct = (cur_done / target_total) * 100
             log(f"Progress: {cur_done}/{target_total} ({pct:.1f}%) | OK: {cur_ok} | FAIL: {cur_fail} | Speed: {speed:.1f} acc/s")
 
@@ -287,6 +291,60 @@ def worker_thread(task_q, proxy_iter, target_total, start_time, batch_sync_size=
             sync_new_keys_to_db(local_buffer)
         local_buffer.clear()
 
+def run_bulk_farm(count=1000, workers=8, progress_cb=None, stop_event=None):
+    global total_ok, total_fail, total_done
+    with stats_lock:
+        total_ok = 0
+        total_fail = 0
+        total_done = 0
+
+    proxies = load_proxies()
+    proxy_iter = cycle(proxies) if proxies else None
+
+    task_q = queue.Queue()
+    for _ in range(count):
+        task_q.put(1)
+
+    start_time = time.time()
+    threads = []
+    for _ in range(workers):
+        t = threading.Thread(
+            target=worker_thread,
+            args=(task_q, proxy_iter, count, start_time, 50, progress_cb, stop_event)
+        )
+        t.daemon = True
+        t.start()
+        threads.append(t)
+
+    while any(t.is_alive() for t in threads):
+        if stop_event and stop_event.is_set():
+            try:
+                while True:
+                    task_q.get_nowait()
+                    task_q.task_done()
+            except queue.Empty:
+                pass
+            break
+        time.sleep(0.1)
+
+    for t in threads:
+        t.join(timeout=1.0)
+
+    sync_script = BASE_DIR / "sync_to_9router.py"
+    if sync_script.exists() and DB_FILE.exists():
+        os.system(f"python3 {sync_script} >/dev/null 2>&1")
+        os.system("pm2 reload 9router --update-env >/dev/null 2>&1 || true")
+
+    elapsed = time.time() - start_time
+    return {
+        "count": count,
+        "done": total_done,
+        "ok": total_ok,
+        "fail": total_fail,
+        "elapsed": elapsed,
+        "speed": total_done / elapsed if elapsed > 0 else 0
+    }
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Bulk create DeepAI accounts fast")
@@ -294,37 +352,9 @@ def main():
     parser.add_argument("--workers", type=int, default=10, help="Concurrent worker threads")
     args = parser.parse_args()
 
-    proxies = load_proxies()
-    proxy_iter = cycle(proxies) if proxies else None
-
-    log(f"Memulai bulk creation target={args.count} workers={args.workers} proxies={len(proxies)}")
-
-    task_q = queue.Queue()
-    for _ in range(args.count):
-        task_q.put(1)
-
-    start_time = time.time()
-    threads = []
-    for _ in range(args.workers):
-        t = threading.Thread(
-            target=worker_thread,
-            args=(task_q, proxy_iter, args.count, start_time)
-        )
-        t.daemon = True
-        t.start()
-        threads.append(t)
-
-    for t in threads:
-        t.join()
-
-    # Final DB sync & reload jika 9Router terpasang lokal
-    sync_script = BASE_DIR / "sync_to_9router.py"
-    if sync_script.exists() and DB_FILE.exists():
-        os.system(f"python3 {sync_script}")
-        os.system("pm2 reload 9router --update-env 2>/dev/null || true")
-
-    elapsed = time.time() - start_time
-    log(f"SELESAI! Target: {args.count} | OK: {total_ok} | FAIL: {total_fail} | Durasi: {elapsed:.1f}s")
+    log(f"Memulai bulk creation target={args.count} workers={args.workers}")
+    res = run_bulk_farm(args.count, args.workers)
+    log(f"SELESAI! Target: {res['count']} | OK: {res['ok']} | FAIL: {res['fail']} | Durasi: {res['elapsed']:.1f}s")
 
 if __name__ == "__main__":
     main()
