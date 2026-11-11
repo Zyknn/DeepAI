@@ -219,25 +219,35 @@ def register_single(proxy=None, max_retries=2, verify_glm=False):
             )
             lat = int((time.time() - t0) * 1000)
             if r.status_code == 201:
-                # Direct JSON key extraction (primary path)
+                # Direct JSON key extraction (hanya jika berformat UUID)
                 api_key = None
                 try:
                     res_json = r.json()
-                    api_key = res_json.get("key")
+                    k = str(res_json.get("key", "")).strip()
+                    if UUID_RE.match(k):
+                        api_key = k
                 except Exception:
                     api_key = None
 
-                # Fallback to profile scrape if JSON key missing
+                # Scrape profile untuk dapatkan API Key UUID riil DeepAI
                 if not api_key:
                     try:
                         prof = s.get("https://deepai.org/dashboard/profile", timeout=12)
-                        m = API_KEY_RE.search(prof.text)
-                        api_key = m.group(1) if m else None
+                        m = re.search(r'id=["\']header-api-key-value["\']\s+value=["\']([^"\']+)["\']', prof.text)
+                        if not m:
+                            m = re.search(r'class=["\']api-password["\'][^>]*value=["\']([^"\']+)["\']', prof.text)
+                        if not m:
+                            m = API_KEY_RE.search(prof.text)
+                        if m:
+                            k = m.group(1).strip()
+                            if UUID_RE.match(k):
+                                api_key = k
                         if not api_key:
-                            keys = FALLBACK_KEY_RE.findall(prof.text)
-                            if keys:
-                                k = keys[0]
-                                api_key = k if isinstance(k, str) else (k[0] or k[1])
+                            for candidate in FALLBACK_KEY_RE.findall(prof.text):
+                                cand_str = (candidate if isinstance(candidate, str) else (candidate[0] or candidate[1])).strip()
+                                if UUID_RE.match(cand_str):
+                                    api_key = cand_str
+                                    break
                     except Exception:
                         pass
                 

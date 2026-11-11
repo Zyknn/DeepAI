@@ -421,13 +421,9 @@ def run_progress_box(target, workers, safe_mode=False, verify_glm=False):
         stop_evt.set()
         print(f"\n\n{P_YELLOW}⚠️  Harvest dihentikan pengguna.{C_RESET} Akun yang sudah didapat tetap aman tersimpan di CSV.")
 
-    print(f"\n{P_PEACH}Tekan Enter untuk kembali ke menu...{C_RESET}", end="", flush=True)
+    print(f"\n{P_PEACH}Tekan Enter atau tombol apa saja untuk kembali ke menu...{C_RESET}", end="", flush=True)
     try:
-        input()
-    except Exception:
-        pass
-    try:
-        input()
+        read_key()
     except Exception:
         pass
 
@@ -482,18 +478,41 @@ def menu_harvest():
                     break
 
             # Mode Selection: Turbo vs Verified
-            clear_screen()
-            render_banner(stats)
-            print(f" {C_BOLD}{P_PINK}⚡ PILIH MODE HARVEST{C_RESET}\n")
-            print(f"   {P_PEACH}[1]{C_RESET} {C_BOLD}{P_WHITE}Mode Turbo (Rekomendasi){C_RESET}")
-            print(f"       {P_SLATE}Kecepatan ~6-10 acc/s. Registrasi cepat + validasi UUID otomatis.{C_RESET}\n")
-            print(f"   {P_PEACH}[2]{C_RESET} {C_BOLD}{P_WHITE}Mode Verified (GLM Deep Probe){C_RESET}")
-            print(f"       {P_SLATE}Kecepatan ~1 acc/s. Auto-test chat GLM-5.3-Flash per akun baru.{C_RESET}\n")
-            try:
-                m_choice = input(f"{P_PEACH}Pilih mode [1/2, default 1]: {C_RESET}").strip()
-            except Exception:
-                m_choice = "1"
-            verify_glm = (m_choice == "2")
+            sel_mode_idx = 0
+            mode_options = [
+                ("1", "Mode Turbo (Rekomendasi)", "Kecepatan ~6-10 acc/s. Registrasi cepat + validasi UUID otomatis."),
+                ("2", "Mode Verified (GLM Deep Probe)", "Kecepatan ~1 acc/s. Auto-test chat GLM-5.3-Flash per akun baru."),
+            ]
+            verify_glm = False
+            while True:
+                clear_screen()
+                render_banner(stats)
+                print(f" {C_BOLD}{P_PINK}⚡ PILIH MODE HARVEST{C_RESET}")
+                print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1/2{P_SLATE}]:{C_RESET}\n")
+                for m_i, (m_num, m_title, m_desc) in enumerate(mode_options):
+                    if m_i == sel_mode_idx:
+                        print(f" {P_PEACH}❯{C_RESET} {P_BG_SEL}{C_BOLD}{P_PINK}[{m_num}] {m_title:<32}{C_RESET} {P_SLATE}{m_desc}{C_RESET}")
+                    else:
+                        print(f"   {P_PEACH}[{m_num}]{C_RESET} {P_WHITE}{m_title:<32}{C_RESET} {P_SLATE}{m_desc}{C_RESET}")
+                print(f"\n{P_SLATE}───────────────────────────────────────────────────────────────{C_RESET}")
+                
+                m_key = read_key()
+                if m_key == "UP":
+                    sel_mode_idx = (sel_mode_idx - 1) % len(mode_options)
+                elif m_key == "DOWN":
+                    sel_mode_idx = (sel_mode_idx + 1) % len(mode_options)
+                elif m_key in ("1", "2"):
+                    verify_glm = (m_key == "2")
+                    break
+                elif m_key == "ENTER":
+                    verify_glm = (mode_options[sel_mode_idx][0] == "2")
+                    break
+                elif m_key in ("0", "q", "Q", "ESC"):
+                    sel_mode_idx = -1
+                    break
+
+            if sel_mode_idx == -1:
+                continue
 
             if chosen_num == "4":
                 # Multi-batch safe cooldown
