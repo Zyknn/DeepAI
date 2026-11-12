@@ -14,8 +14,6 @@ import queue
 import re
 import select
 import shutil
-import socket
-import socketserver
 import sys
 import threading
 import time
@@ -23,7 +21,6 @@ import urllib.error
 import urllib.request
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 # Impor engine backend
@@ -107,26 +104,6 @@ def get_terminal_width():
         return os.get_terminal_size().columns
     except Exception:
         return 70
-
-def get_public_ip():
-    urls = ["https://api.ipify.org", "https://ifconfig.me", "https://icanhazip.com"]
-    for url in urls:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                ip = resp.read().decode().strip()
-                if ip and len(ip.split(".")) == 4:
-                    return ip
-        except Exception:
-            continue
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
 
 _KEY_PUSHBACK = bytearray()
 _WIN_PUSHBACK = []
@@ -770,214 +747,338 @@ def menu_stats():
     except Exception:
         pass
 
-# ---------------- MENU 3: AUTO SHARE & DOWNLOAD CSV ----------------
-class CSVDownloadHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if not CSV_FILE.exists():
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"File not found\n")
-            return
+# ---------------- MENU 3: EXPORT & KIRIM HASIL ----------------
+EXPORT_FORMAT_OPTIONS = [
+    ("1", "API Key Saja (.txt)", "Hanya UUID api_key valid (1 per baris)", "apikey"),
+    ("2", "Email + API Key (.csv)", "Hanya kolom email & api_key valid", "email_apikey"),
+    ("3", "Lengkap — Valid (.csv)", "Email, password, api_key, dll (status ok)", "lengkap"),
+    ("4", "Master CSV Asli (.csv)", "Seluruh deepai.csv (termasuk baris gagal)", "raw"),
+    ("0", "Kembali", "Kembali ke menu sebelumnya", None),
+]
 
-        client_ip = self.client_address[0]
-        sys.stdout.write(f"\n {P_MINT}📥 [{datetime.now().strftime('%H:%M:%S')}] Request download dari {client_ip} diterima! Mengirim CSV...{C_RESET}\n")
-        sys.stdout.flush()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/csv; charset=utf-8")
-        self.send_header("Content-Disposition", 'attachment; filename="deepai.csv"')
-        self.send_header("Content-Length", str(CSV_FILE.stat().st_size))
-        self.end_headers()
-        with open(CSV_FILE, "rb") as f:
-            shutil.copyfileobj(f, self.wfile)
-        sys.stdout.write(f" {P_MINT}✨ File deepai.csv sukses terkirim ke {client_ip}!{C_RESET}\n")
-        sys.stdout.flush()
+def _format_size(num_bytes):
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 * 1024):.2f} MB"
 
-    def log_message(self, format, *args):
-        pass  # Supress standard raw log
+def _load_csv_records(csv_path=None):
+    src = Path(csv_path) if csv_path else CSV_FILE
+    default_fields = ["email", "password", "api_key", "status", "proxy", "created_at_wib"]
+    if not src.exists():
+        return default_fields, [], []
+    all_rows = []
+    valid_rows = []
+    fieldnames = default_fields
+    with open(src, "r", encoding="utf-8", errors="ignore", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames:
+            fieldnames = list(reader.fieldnames)
+        for r in reader:
+            all_rows.append(r)
+            k = (r.get("api_key") or "").strip()
+            if r.get("status") == "ok" and k and (UUID_RE.match(k) or len(k) == 36):
+                valid_rows.append(r)
+    return fieldnames, all_rows, valid_rows
 
-def start_http_server():
-    clear_screen()
-    stats = get_csv_stats()
-    render_banner(stats)
+def build_export_artifact(mode, csv_path=None, out_dir=None):
+    src = Path(csv_path) if csv_path else CSV_FILE
+    dest_dir = Path(out_dir) if out_dir else OUT_DIR
+    if not src.exists():
+        return {"ok": False, "reason": f"File {src} belum ada. Silakan panen akun dulu.", "count": 0}
 
-    if not CSV_FILE.exists():
-        print(f"{P_YELLOW}⚠️  File {CSV_FILE} belum ada! Panen akun dulu ya.{C_RESET}")
-        input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
-        return
+    fieldnames, all_rows, valid_rows = _load_csv_records(src)
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
-    port = 18888
-    httpd = None
-    for p in range(18888, 18900):
-        try:
-            httpd = socketserver.TCPServer(("0.0.0.0", p), CSVDownloadHandler)
-            port = p
-            break
-        except OSError:
-            continue
+    if mode == "apikey":
+        if not valid_rows:
+            return {"ok": False, "reason": "Belum ada akun valid (status=ok) untuk diekspor sebagai API Key saja.", "count": 0}
+        out_path = dest_dir / "api_keys_only.txt"
+        with open(out_path, "w", encoding="utf-8") as f:
+            for r in valid_rows:
+                f.write((r.get("api_key") or "").strip() + "\n")
+        size_bytes = out_path.stat().st_size
+        size_str = _format_size(size_bytes)
+        return {
+            "ok": True,
+            "mode": "apikey",
+            "label": "API Key Saja (.txt)",
+            "path": out_path,
+            "filename": out_path.name,
+            "mime": "text/plain",
+            "count": len(valid_rows),
+            "size_bytes": size_bytes,
+            "size_str": size_str,
+            "caption": f"🌸 DeepAI API Keys Only\n🔑 Valid Keys: {len(valid_rows):,}\n📁 File: {out_path.name} ({size_str})",
+        }
 
-    if not httpd:
-        print(f"{P_YELLOW}Gagal bind port HTTP.{C_RESET}")
-        return
+    if mode == "email_apikey":
+        if not valid_rows:
+            return {"ok": False, "reason": "Belum ada akun valid (status=ok) untuk diekspor.", "count": 0}
+        out_path = dest_dir / "deepai_email_apikey.csv"
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["email", "api_key"], extrasaction="ignore")
+            writer.writeheader()
+            for r in valid_rows:
+                writer.writerow({"email": r.get("email", ""), "api_key": (r.get("api_key") or "").strip()})
+        size_bytes = out_path.stat().st_size
+        size_str = _format_size(size_bytes)
+        return {
+            "ok": True,
+            "mode": "email_apikey",
+            "label": "Email + API Key (.csv)",
+            "path": out_path,
+            "filename": out_path.name,
+            "mime": "text/csv",
+            "count": len(valid_rows),
+            "size_bytes": size_bytes,
+            "size_str": size_str,
+            "caption": f"🌸 DeepAI Export (Email + API Key)\n🌾 Valid Akun: {len(valid_rows):,}\n📁 File: {out_path.name} ({size_str})",
+        }
 
-    t = threading.Thread(target=httpd.serve_forever, daemon=True)
-    t.start()
+    if mode == "lengkap":
+        if not valid_rows:
+            return {"ok": False, "reason": "Belum ada akun valid (status=ok) untuk diekspor.", "count": 0}
+        out_path = dest_dir / "deepai_lengkap.csv"
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(valid_rows)
+        size_bytes = out_path.stat().st_size
+        size_str = _format_size(size_bytes)
+        return {
+            "ok": True,
+            "mode": "lengkap",
+            "label": "Lengkap — Valid (.csv)",
+            "path": out_path,
+            "filename": out_path.name,
+            "mime": "text/csv",
+            "count": len(valid_rows),
+            "size_bytes": size_bytes,
+            "size_str": size_str,
+            "caption": f"🌸 DeepAI Accounts Lengkap (Valid)\n🌾 Valid Akun: {len(valid_rows):,}\n📁 File: {out_path.name} ({size_str})",
+        }
 
-    ip = get_public_ip()
-    dl_url = f"http://{ip}:{port}/deepai.csv"
+    if mode == "raw":
+        if not all_rows or src.stat().st_size == 0:
+            return {"ok": False, "reason": "File master deepai.csv masih kosong.", "count": 0}
+        size_bytes = src.stat().st_size
+        size_str = _format_size(size_bytes)
+        return {
+            "ok": True,
+            "mode": "raw",
+            "label": "Master CSV Asli (.csv)",
+            "path": src,
+            "filename": src.name,
+            "mime": "text/csv",
+            "count": len(all_rows),
+            "valid_count": len(valid_rows),
+            "size_bytes": size_bytes,
+            "size_str": size_str,
+            "caption": f"🌸 DeepAI Master CSV (Lengkap Raw)\n🌾 Valid: {len(valid_rows):,} / Total: {len(all_rows):,}\n📁 File: {src.name} ({size_str})",
+        }
 
-    print(f" {C_BOLD}{P_MINT}🌐 INSTANT DOWNLOAD WEB SERVER AKTIF!{C_RESET}\n")
-    print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
-    print(box_row(f" {P_WHITE}File CSV siap disedot langsung dari browser / terminal:{C_RESET}"))
-    print(box_row(""))
-    print(box_row(f" {P_PEACH}👉 Link Download Langsung:{C_RESET}"))
-    print(box_row(f"    {C_BOLD}{P_SKY}{dl_url}{C_RESET}"))
-    print(box_row(""))
-    print(box_row(f" {P_PEACH}👉 Perintah Sedot di VPS Lain / Laptop:{C_RESET}"))
-    print(box_row(f"    {P_MINT}curl -s {dl_url} -o deepai.csv{C_RESET}"))
-    print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}")
+    raise ValueError(f"Format export tidak dikenal: {mode}")
 
-    print(f"\n {P_MINT}🟢 Server aktif mendengarkan di port {port}...{C_RESET}")
-    print(f" {P_PEACH}Ketik {C_BOLD}'q'{C_RESET}{P_PEACH} lalu Enter (atau Ctrl+C) untuk STOP server:{C_RESET} ", end="", flush=True)
+def _upload_telegram_document(token, chat_id, file_path, filename, mime_type, caption, timeout=30):
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    p = Path(file_path)
+    if requests is not None:
+        with open(p, "rb") as f:
+            files = {"document": (filename, f, mime_type)}
+            data = {"chat_id": str(chat_id), "caption": caption}
+            return requests.post(url, files=files, data=data, timeout=timeout).json()
 
+    boundary = f"----DeepAIBoundary{os.urandom(8).hex()}"
+    file_bytes = p.read_bytes()
+    parts = []
+    for k, v in {"chat_id": str(chat_id), "caption": caption}.items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{k}"\r\n\r\n'
+                f"{v}\r\n"
+            ).encode("utf-8")
+        )
+    parts.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
+            f"Content-Type: {mime_type}\r\n\r\n"
+        ).encode("utf-8")
+        + file_bytes
+        + b"\r\n"
+    )
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    body = b"".join(parts)
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+            "User-Agent": "DeepAI-TUI/1.0",
+        },
+        method="POST",
+    )
     try:
-        while True:
-            cmd = input().strip().lower()
-            if cmd in ("q", "quit", "exit", "stop", "kembali", "batal"):
-                break
-            print(f" {P_SLATE}Server masih aktif di port {port}. Ketik 'q' untuk keluar:{C_RESET} ", end="", flush=True)
-    except (KeyboardInterrupt, Exception):
-        pass
-    finally:
-        httpd.shutdown()
-        print(f"\n{P_SLATE}Web server dimatikan secara aman.{C_RESET}")
-        time.sleep(0.5)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        raw_err = e.read().decode("utf-8", errors="replace")
+        try:
+            return json.loads(raw_err)
+        except Exception:
+            return {"ok": False, "description": f"HTTP {e.code}: {raw_err[:120]}"}
+
+def select_export_format(title):
+    stats = get_csv_stats()
+    if not CSV_FILE.exists():
+        clear_screen()
+        render_banner(stats)
+        print(f"{P_YELLOW}⚠️  File {CSV_FILE} belum ada. Silakan panen akun dulu.{C_RESET}")
+        try:
+            input(f"\n{P_PEACH}Tekan Enter untuk kembali...{C_RESET}")
+        except Exception:
+            pass
+        flush_stdin()
+        return None
+
+    sel_idx = 0
+    while True:
+        clear_screen()
+        stats = get_csv_stats()
+        render_banner(stats)
+        print(f" {C_BOLD}{P_PINK}{title}{C_RESET}")
+        print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} (atau {P_PEACH}W/S{P_SLATE}) lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1-4{P_SLATE}]:{C_RESET}\n")
+
+        for idx, (num, label, desc, _) in enumerate(EXPORT_FORMAT_OPTIONS):
+            if idx == sel_idx:
+                print(f" {P_PEACH}❯{C_RESET} {P_BG_SEL}{C_BOLD}{P_PINK}[{num}] {label:<26}{C_RESET} {P_SLATE}{desc}{C_RESET}")
+            else:
+                print(f"   {P_PEACH}[{num}]{C_RESET} {P_WHITE}{label:<26}{C_RESET} {P_SLATE}{desc}{C_RESET}")
+        print(f"\n{P_SLATE}───────────────────────────────────────────────────────────────{C_RESET}")
+
+        key = read_key()
+        if key == "UP":
+            sel_idx = (sel_idx - 1) % len(EXPORT_FORMAT_OPTIONS)
+        elif key == "DOWN":
+            sel_idx = (sel_idx + 1) % len(EXPORT_FORMAT_OPTIONS)
+        elif key in ("0", "ESC"):
+            return None
+        elif key in ("ENTER", "1", "2", "3", "4"):
+            chosen_num = key if key in ("1", "2", "3", "4") else EXPORT_FORMAT_OPTIONS[sel_idx][0]
+            if chosen_num == "0":
+                return None
+            mode = next(o[3] for o in EXPORT_FORMAT_OPTIONS if o[0] == chosen_num)
+            artifact = build_export_artifact(mode)
+            if not artifact.get("ok"):
+                print(f"\n{P_YELLOW}⚠️  {artifact.get('reason', 'Gagal memproses export.')}{C_RESET}")
+                try:
+                    input(f"\n{P_PEACH}Tekan Enter untuk pilih format lain...{C_RESET}")
+                except Exception:
+                    pass
+                flush_stdin()
+                continue
+            return artifact
+
 def send_telegram_doc():
+    artifact = select_export_format("✈️  PILIH ISI FILE UNTUK TELEGRAM BOT")
+    if not artifact:
+        return
+
     clear_screen()
     stats = get_csv_stats()
     render_banner(stats)
-
-    if not CSV_FILE.exists():
-        print(f"{P_YELLOW}⚠️  File CSV belum ada. Silakan panen akun dulu.{C_RESET}")
-        input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
-        return
 
     cfg = load_config()
     saved_token = cfg.get("telegram_token", os.environ.get("TELEGRAM_BOT_TOKEN", ""))
     saved_chat = cfg.get("telegram_chat_id", "1152978753")
 
-    print(f" {C_BOLD}{P_PINK}✈️  KIRIM CSV KE TELEGRAM BOT{C_RESET}\n")
-    tok_input = input(f"{P_PEACH}Bot Token {P_SLATE}[Enter untuk pakai saved]{C_RESET}: ").strip()
-    token = tok_input if tok_input else saved_token
+    print(f" {C_BOLD}{P_PINK}✈️  KIRIM HASIL KE TELEGRAM BOT{C_RESET}\n")
+    print(f" {P_SLATE}Format :{C_RESET} {P_MINT}{artifact['label']}{C_RESET}")
+    print(f" {P_SLATE}File   :{C_RESET} {P_SKY}{artifact['filename']}{C_RESET} {P_SLATE}({artifact['size_str']}, {artifact['count']:,} data){C_RESET}\n")
 
-    if not token:
-        print(f"{P_YELLOW}Token bot tidak boleh kosong!{C_RESET}")
-        time.sleep(1)
+    try:
+        tok_hint = "[Enter untuk pakai saved]" if saved_token else "[wajib diisi]"
+        tok_input = input(f"{P_PEACH}Bot Token {P_SLATE}{tok_hint}{C_RESET}: ").strip()
+        token = tok_input if tok_input else saved_token
+
+        if not token:
+            print(f"{P_YELLOW}Token bot tidak boleh kosong!{C_RESET}")
+            time.sleep(1)
+            flush_stdin()
+            return
+
+        chat_input = input(f"{P_PEACH}Chat ID {P_SLATE}[default: {saved_chat}]{C_RESET}: ").strip()
+        chat_id = chat_input if chat_input else saved_chat
+    except (KeyboardInterrupt, EOFError):
+        flush_stdin()
         return
-
-    chat_input = input(f"{P_PEACH}Chat ID {P_SLATE}[default: {saved_chat}]{C_RESET}: ").strip()
-    chat_id = chat_input if chat_input else saved_chat
 
     cfg["telegram_token"] = token
     cfg["telegram_chat_id"] = chat_id
     save_config(cfg)
 
-    print(f"\n{P_SKY}Mengunggah {CSV_FILE.name} ({stats['size_str']}) ke Telegram...{C_RESET}")
-
-    caption = f"🌸 DeepAI Accounts Harvested\n🌾 Total Akun: {stats['ok']:,} Valid Key\n📁 File: deepai.csv ({stats['size_str']})"
+    print(f"\n{P_SKY}Mengunggah {artifact['filename']} ({artifact['size_str']}) ke Telegram...{C_RESET}")
 
     try:
-        url = f"https://api.telegram.org/bot{token}/sendDocument"
-        if requests is not None:
-            with open(CSV_FILE, "rb") as f:
-                files = {"document": ("deepai.csv", f, "text/csv")}
-                data = {"chat_id": chat_id, "caption": caption}
-                res = requests.post(url, files=files, data=data, timeout=30).json()
-        else:
-            boundary = f"----DeepAIBoundary{os.urandom(8).hex()}"
-            file_bytes = CSV_FILE.read_bytes()
-            parts = []
-            for k, v in {"chat_id": chat_id, "caption": caption}.items():
-                parts.append(
-                    (
-                        f"--{boundary}\r\n"
-                        f'Content-Disposition: form-data; name="{k}"\r\n\r\n'
-                        f"{v}\r\n"
-                    ).encode("utf-8")
-                )
-            parts.append(
-                (
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="document"; filename="deepai.csv"\r\n'
-                    f"Content-Type: text/csv\r\n\r\n"
-                ).encode("utf-8")
-                + file_bytes
-                + b"\r\n"
-            )
-            parts.append(f"--{boundary}--\r\n".encode("utf-8"))
-            body = b"".join(parts)
-            req = urllib.request.Request(
-                url,
-                data=body,
-                headers={
-                    "Content-Type": f"multipart/form-data; boundary={boundary}",
-                    "Content-Length": str(len(body)),
-                    "User-Agent": "DeepAI-TUI/1.0",
-                },
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    res = json.loads(resp.read().decode("utf-8", errors="replace"))
-            except urllib.error.HTTPError as e:
-                raw_err = e.read().decode("utf-8", errors="replace")
-                try:
-                    res = json.loads(raw_err)
-                except Exception:
-                    res = {"ok": False, "description": f"HTTP {e.code}: {raw_err[:120]}"}
-        
+        res = _upload_telegram_document(
+            token=token,
+            chat_id=chat_id,
+            file_path=artifact["path"],
+            filename=artifact["filename"],
+            mime_type=artifact["mime"],
+            caption=artifact["caption"],
+            timeout=30,
+        )
         if res.get("ok"):
-            print(f"\n{P_MINT}✨ Berhasil terkirim ke Telegram chat {chat_id}!{C_RESET}")
+            print(f"\n{P_MINT}✨ Berhasil mengirim {artifact['filename']} ke Telegram chat {chat_id}!{C_RESET}")
         else:
             print(f"\n{P_YELLOW}Gagal mengirim: {res.get('description', 'Unknown error')}{C_RESET}")
     except Exception as e:
         print(f"\n{P_YELLOW}Terjadi kesalahan koneksi: {e}{C_RESET}")
 
-    input(f"\n{P_PEACH}Tekan Enter untuk kembali...{C_RESET}")
+    try:
+        input(f"\n{P_PEACH}Tekan Enter untuk kembali...{C_RESET}")
+    except Exception:
+        pass
+    flush_stdin()
 
-def export_keys_only():
+def export_local_menu():
+    artifact = select_export_format("💾 PILIH FORMAT EXPORT FILE LOKAL")
+    if not artifact:
+        return
+
     clear_screen()
     stats = get_csv_stats()
     render_banner(stats)
 
-    if not CSV_FILE.exists():
-        print(f"{P_YELLOW}⚠️  File CSV belum ada.{C_RESET}")
-        input(f"\n{P_PEACH}Tekan Enter...{C_RESET}")
-        return
+    unit = "key" if artifact["mode"] == "apikey" else ("baris" if artifact["mode"] == "raw" else "akun")
+    print(f" {C_BOLD}{P_MINT}💾 EXPORT FILE SELESAI{C_RESET}\n")
+    print(f"{P_LAVENDER}╭─────────────────────────────────────────────────────────────╮{C_RESET}")
+    print(box_row(f" {P_WHITE}Format      :{C_RESET} {P_MINT}{artifact['label']}{C_RESET}"))
+    print(box_row(f" {P_WHITE}Jumlah Data :{C_RESET} {P_MINT}{artifact['count']:,} {unit}{C_RESET}"))
+    print(box_row(f" {P_WHITE}Ukuran File :{C_RESET} {P_SKY}{artifact['size_str']}{C_RESET}"))
+    print(box_row(f" {P_WHITE}Nama File   :{C_RESET} {P_PEACH}{artifact['filename']}{C_RESET}"))
+    print(f"{P_LAVENDER}╰─────────────────────────────────────────────────────────────╯{C_RESET}\n")
+    print(f"{P_SLATE}Lokasi lengkap:{C_RESET} {P_SKY}{artifact['path']}{C_RESET}")
+    if artifact["mode"] == "apikey":
+        print(f"{P_SLATE}Siap di-import langsung ke 9Router, NextChat, Cherry Studio, dll.{C_RESET}")
+    else:
+        print(f"{P_SLATE}Berisi data akun lengkap sesuai format pilihan Anda.{C_RESET}")
 
-    out_keys = OUT_DIR / "api_keys_only.txt"
-    keys = []
-    with open(CSV_FILE, "r", encoding="utf-8", errors="ignore") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            k = r.get("api_key", "").strip()
-            if k and len(k) == 36 and r.get("status") == "ok":
-                keys.append(k)
+    try:
+        input(f"\n{P_PEACH}Tekan Enter untuk kembali...{C_RESET}")
+    except Exception:
+        pass
+    flush_stdin()
 
-    with open(out_keys, "w", encoding="utf-8") as f:
-        for k in keys:
-            f.write(k + "\n")
-
-    print(f" {C_BOLD}{P_MINT}🔑 EKSPOR API KEY SELESAI{C_RESET}\n")
-    print(f"{P_WHITE}Total {P_MINT}{len(keys):,}{P_WHITE} valid API key berhasil diekspor ke:{C_RESET}")
-    print(f"{P_SKY}{out_keys}{C_RESET}\n")
-    print(f"{P_SLATE}File ini siap di-import ke 9Router, NextChat, Cherry Studio, dll.{C_RESET}")
-    input(f"\n{P_PEACH}Tekan Enter untuk kembali...{C_RESET}")
+export_keys_only = export_local_menu  # backward compatibility alias
 
 def menu_share():
     opts = [
-        ("1", "Instant Web Server (HTTP)", "Buka link download langsung untuk VPS / laptop", start_http_server),
-        ("2", "Kirim ke Telegram Bot", "Upload otomatis file CSV ke akun/grup Telegram", send_telegram_doc),
-        ("3", "Ekspor API Key Saja (.txt)", "Simpan hanya UUID key ke api_keys_only.txt", export_keys_only),
+        ("1", "Export File Lokal (.txt/.csv)", "Pilih API Key saja, Email+Key, atau Lengkap", export_local_menu),
+        ("2", "Kirim ke Telegram Bot", "Upload ke Telegram (pilih API Key saja / lengkap)", send_telegram_doc),
         ("0", "Kembali", "Kembali ke menu utama", None),
     ]
 
@@ -986,8 +1087,8 @@ def menu_share():
         clear_screen()
         stats = get_csv_stats()
         render_banner(stats)
-        print(f" {C_BOLD}{P_PINK}🚀 PILIH METODE SHARE / DOWNLOAD CSV{C_RESET}")
-        print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} (atau {P_PEACH}W/S{P_SLATE}) lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1-3{P_SLATE}]:{C_RESET}\n")
+        print(f" {C_BOLD}{P_PINK}📤 EXPORT & SHARE HASIL PANEN{C_RESET}")
+        print(f"{P_SLATE} Navigasi: {P_PEACH}↑/↓{P_SLATE} (atau {P_PEACH}W/S{P_SLATE}) lalu {P_PEACH}Enter{P_SLATE}, atau tekan angka [{P_PEACH}1-2{P_SLATE}]:{C_RESET}\n")
 
         for idx, (num, label, desc, _) in enumerate(opts):
             if idx == sel_idx:
@@ -1001,8 +1102,10 @@ def menu_share():
             sel_idx = (sel_idx - 1) % len(opts)
         elif key == "DOWN":
             sel_idx = (sel_idx + 1) % len(opts)
-        elif key in ("ENTER", "1", "2", "3", "0"):
-            chosen_num = key if key in ("1", "2", "3", "0") else opts[sel_idx][0]
+        elif key in ("0", "ESC"):
+            break
+        elif key in ("ENTER", "1", "2"):
+            chosen_num = key if key in ("1", "2") else opts[sel_idx][0]
             if chosen_num == "0":
                 break
             handler = next(o[3] for o in opts if o[0] == chosen_num)
@@ -1373,7 +1476,7 @@ def main():
     options = [
         ("1", "⚡ Quick Harvest Akun", "Pilih target 100/500/1000/5000 & threads", menu_harvest),
         ("2", "📊 Cek Statistik & Data", "Lihat total akun, status, dan 5 akun terakhir", menu_stats),
-        ("3", "🚀 Auto Kirim / Share CSV", "Instant Web Server & kirim Telegram doc", menu_share),
+        ("3", "📤 Export & Kirim Hasil", "Export lokal (API key / lengkap) & kirim Telegram", menu_share),
         ("4", "🧪 Test Validasi API Key", "Uji coba kirim chat live ke DeepAI API", menu_test_key),
         ("5", "🔄 Sync ke 9Router", "Ingest key ke database 9Router lokal", menu_sync),
         ("0", "🚪 Keluar", "Tutup antarmuka TUI", None),

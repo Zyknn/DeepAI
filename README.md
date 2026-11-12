@@ -60,7 +60,7 @@ High-performance automated account harvesting, auto-harvesting API key, and inst
 .
 ├── deepai.py          # Launcher utama CLI & TUI Dashboard
 ├── main.py            # Alias launcher entrypoint
-├── tui.py             # Interactive TUI (animated harvest, stats, share, test)
+├── tui.py             # Interactive TUI (animated harvest, stats, export, test)
 ├── bulk_create.py     # Engine utama: multi-threaded direct HTTP harvesting & live sync
 ├── sync_to_9router.py # Ingest tool: CSV -> 9Router SQLite DB
 ├── proxylist.py       # Helper proxy rotation pool
@@ -88,7 +88,7 @@ python3 deepai.py
 Antarmuka siap pakai tanpa konfigurasi tambahan:
 - **[1] Quick Harvest:** Pilih target (100 / 500 / 1000 / 5000 multi-batch safe cooldown)
 - **[2] Cek Statistik:** Ringkasan akun valid, gagal, ukuran CSV, dan 5 akun terakhir
-- **[3] Auto Kirim / Share CSV:** Instant download web server & auto upload ke Telegram
+- **[3] Export & Kirim Hasil:** Export lokal (`API Key Saja`, `Email + API Key`, `Lengkap`, `Master CSV`) & upload ke Telegram Bot sesuai format pilihan
 - **[4] Test API Key:** Verifikasi format key & probe live ke endpoint DeepAI
 - **[5] Sync ke 9Router:** Ingest langsung ke SQLite 9Router lokal
 

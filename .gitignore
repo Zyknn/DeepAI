@@ -11,4 +11,5 @@ proxies.txt
 bulk.log
 *.csv
 *.jsonl
+.tui_config.json
 .DS_Store
