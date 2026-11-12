@@ -16,7 +16,7 @@ High-performance automated account harvesting, auto-harvesting API key, and inst
 
 ## About
 
-High-performance automated account harvesting, auto-harvesting API key, and instant SQLite ingestion pipeline for DeepAI into 9Router. Designed for generating thousands of verified accounts without browser overhead and loading them directly into multi-key LLM proxies for free inference (`deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`).
+High-performance automated account harvesting, auto-harvesting API key, and instant SQLite ingestion pipeline for DeepAI into 9Router. Designed for generating thousands of verified accounts without browser overhead and loading them directly into multi-key LLM proxies for free inference (`deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`, `deepai/deepseek-v4.1-flash`).
 
 ### Benchmark Produksi
 
@@ -25,7 +25,17 @@ High-performance automated account harvesting, auto-harvesting API key, and inst
 | **Throughput harvesting** | ~2.7 akun / detik (12 concurrent worker threads) |
 | **Kapasitas Batch** | 2.000 akun selesai dalam **~12 menit** (1.994 sukses, 6 timeout/retry) |
 | **Throughput Ingest DB** | 2.000+ akun terindeks ke SQLite dalam **< 1.5 detik** |
-| **Model LLM Aktif** | `deepai/glm-5.3-flash`, `deepai/gpt-oss-120b` |
+| **Model LLM Aktif** | `deepai/glm-5.3-flash`, `deepai/gpt-oss-120b`, `deepai/deepseek-v4.1-flash` |
+
+---
+
+## Preview
+
+<p align="center">
+  <img src="assets/preview.jpg" alt="DeepAI Harvest TUI, Statistik Panen, dan Available Models di 9Router" width="100%" />
+  <br />
+  <sub>Interactive TUI dashboard, live harvest stats, dan model <code>glm-5.3-flash</code>, <code>gpt-oss-120b</code>, serta <code>deepseek-v4.1-flash</code> di 9Router.</sub>
+</p>
 
 ---
 
@@ -66,9 +76,10 @@ High-performance automated account harvesting, auto-harvesting API key, and inst
 ├── proxylist.py       # Helper proxy rotation pool
 ├── tempmail.py        # Helper mailbox generator & token handler (mail.tm)
 ├── util.py            # Logging helper & sanitasi proxy string
-├── proxies.example.txt# Contoh struktur file konfigurasi proxy
-├── requirements.txt   # Dependensi opsional (tool jalan tanpa pip/venv via Python stdlib)
-├── LICENSE            # Lisensi resmi MIT (Copyright Zykuan)
+├── proxies.example.txt # Contoh struktur file konfigurasi proxy
+├── requirements.txt    # Dependensi opsional (tool jalan tanpa pip/venv via Python stdlib)
+├── assets/preview.jpg  # Preview screenshot TUI & model 9Router
+├── LICENSE             # Lisensi resmi MIT (Copyright Zykuan)
 └── README.md
 ```
 
@@ -156,6 +167,16 @@ Setelah ingest selesai, reload proses PM2 9Router:
 ```bash
 pm2 reload 9router --update-env
 ```
+
+### Model yang Didukung
+
+Tambahkan model ID berikut pada panel **Available Models** provider DeepAI di dashboard 9Router (prefix default dari `sync_to_9router.py`: `deepai/*`):
+
+| Model ID | Format 9Router |
+| :--- | :--- |
+| `glm-5.3-flash` | `deepai/glm-5.3-flash` |
+| `gpt-oss-120b` | `deepai/gpt-oss-120b` |
+| `deepseek-v4.1-flash` | `deepai/deepseek-v4.1-flash` |
 
 ---
 
